@@ -9,4 +9,5 @@ python3 -m pip install -q quart
 python3 benchmarks/disagg_benchmarks/disagg_prefill_proxy_server.py \
     --prefill-url "http://${PREFILL_IP}:8100" \
     --decode-url "http://${DECODE_IP}:8200" \
+    --kv-host "${PREFILL_IP}" \
     --port 8000
