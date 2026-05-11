@@ -5,6 +5,7 @@ pkill -9 -f vllm
 pkill -9 -f "disagg_proxy"
 pkill -9 -f "start_prefill"
 pkill -9 -f "start_decode"
+pkill -9 -f "start_standalone"
 pkill -9 -f "proxy.py"
 
 # Kill any remaining processes holding GPU memory
