@@ -18,7 +18,7 @@ decode_instances: dict[str, Any] = {}
 prefill_cv = threading.Condition()
 decode_cv = threading.Condition()
 
-DEFAULT_PING_SECONDS = 5
+DEFAULT_PING_SECONDS = 15  # workers ping every 3s; 15s gives 5x headroom
 
 
 def _remove_oldest_instances(instances: dict[str, Any]) -> None:
