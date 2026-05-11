@@ -98,10 +98,14 @@ async def collect_response(url, data, request_id):
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY', '')}",
         "X-Request-Id": request_id,
     }
-    async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
-        async with session.post(url=url, json=data, headers=headers) as response:
-            await response.read()
-            return response.status
+    try:
+        async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
+            async with session.post(url=url, json=data, headers=headers) as response:
+                await response.read()
+                print(f"prefill response status: {response.status}")
+                return response.status
+    except Exception as e:
+        print(f"collect_response error ({url}): {e}")
 
 
 async def stream_response(url, data, request_id, queue: asyncio.Queue):
@@ -110,11 +114,16 @@ async def stream_response(url, data, request_id, queue: asyncio.Queue):
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY', '')}",
         "X-Request-Id": request_id,
     }
-    async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
-        async with session.post(url=url, json=data, headers=headers) as response:
-            async for chunk in response.content.iter_chunked(1024):
-                await queue.put(chunk)
-    await queue.put(None)  # sentinel
+    try:
+        async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
+            async with session.post(url=url, json=data, headers=headers) as response:
+                print(f"decode response status: {response.status}")
+                async for chunk in response.content.iter_chunked(1024):
+                    await queue.put(chunk)
+    except Exception as e:
+        print(f"stream_response error ({url}): {e}")
+    finally:
+        await queue.put(None)  # sentinel — always unblocks generate()
 
 
 async def handle_request():
