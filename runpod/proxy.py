@@ -115,13 +115,17 @@ async def stream_response(url, data, request_id, queue: asyncio.Queue):
         "X-Request-Id": request_id,
     }
     try:
+        print(f"[DECODE] About to POST to {url}")
         async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
+            print(f"[DECODE] Session opened, sending POST")
             async with session.post(url=url, json=data, headers=headers) as response:
-                print(f"decode response status: {response.status}")
+                print(f"[DECODE] Got response headers, status={response.status}")
                 async for chunk in response.content.iter_chunked(1024):
+                    print(f"[DECODE] Got chunk of size {len(chunk)}")
                     await queue.put(chunk)
+                print(f"[DECODE] Stream ended normally")
     except Exception as e:
-        print(f"stream_response error ({url}): {e}")
+        print(f"[DECODE] Exception: {type(e).__name__}: {e}")
     finally:
         await queue.put(None)  # sentinel — always unblocks generate()
 
