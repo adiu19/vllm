@@ -1,4 +1,8 @@
 #!/bin/bash
-nohup python3 runpod/proxy.py > /tmp/proxy.log 2>&1 &
+set -e
+
+source /tmp/config.sh
+
+nohup python3 runpod/proxy.py > "$PROXY_LOG" 2>&1 &
 echo $! > /tmp/proxy.pid
-echo "Proxy started (PID $!). Logs: tail -f /tmp/proxy.log"
+echo "Proxy started (PID $!). Logs: tail -f $PROXY_LOG"

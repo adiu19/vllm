@@ -1,20 +1,20 @@
 #!/bin/bash
 set -e
 
-: "${PREFILL_IP:?Set PREFILL_IP to this node's IP}"
-: "${DECODE_IP:?Set DECODE_IP to the decode node's IP}"
-: "${MODEL:?Set MODEL to the HuggingFace model ID}"
+source /tmp/config.sh
+
+export VLLM_HOST_IP="$PREFILL_IP"
 
 KV_CONFIG=$(cat <<EOF
-{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2,"kv_buffer_size":"1e9","kv_port":"14579","kv_connector_extra_config":{"proxy_ip":"${PREFILL_IP}","proxy_port":"30001","http_ip":"${PREFILL_IP}","http_port":"8100","send_type":"PUT_ASYNC"}}
+{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2,"kv_buffer_size":"1e9","kv_port":"${PREFILL_KV_PORT}","kv_connector_extra_config":{"proxy_ip":"${PREFILL_IP}","proxy_port":"${PROXY_ZMQ_PORT}","http_ip":"${PREFILL_IP}","http_port":"${PREFILL_PORT}","send_type":"PUT_ASYNC"}}
 EOF
 )
 
 nohup python3 -m vllm.entrypoints.openai.api_server \
     --model "$MODEL" \
     --host 0.0.0.0 \
-    --port 8100 \
+    --port "$PREFILL_PORT" \
     --gpu-memory-utilization 0.8 \
-    --kv-transfer-config "$KV_CONFIG" > /tmp/prefill.log 2>&1 &
+    --kv-transfer-config "$KV_CONFIG" > "$PREFILL_LOG" 2>&1 &
 echo $! > /tmp/prefill.pid
-echo "Prefill started (PID $!). Logs: tail -f /tmp/prefill.log"
+echo "Prefill started (PID $!). Logs: tail -f $PREFILL_LOG"
