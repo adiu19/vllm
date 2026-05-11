@@ -911,11 +911,37 @@ class EngineCoreProc(EngineCore):
             self.output_thread.start()
 
             # FlowPrefill: SLO monitor on prefill-capable nodes only.
-            # Gated on kv_role to skip pure decode nodes and standard
-            # non-disaggregated deployments where flow-prefill doesn't apply.
+            # The monitor's priority model assumes admission-only scheduling
+            # (a request either runs to completion in its forward pass or
+            # waits — no "admitted but idle this tick" state). Several
+            # vLLM features violate that assumption by leaving requests
+            # in self.running between forward passes:
+            #   - chunked prefill (enable_chunked_prefill)
+            #   - long-prefill chunking (long_prefill_token_threshold > 0)
+            #   - pipeline parallelism (PP > 1, prior-tick tokens in flight)
+            #   - async scheduling (CPU/GPU overlap)
+            # We gate explicitly on each so a future expansion to chunked
+            # prefill is a deliberate, scoped change rather than an
+            # implicit broadening of acceptable states.
             self.slo_monitor = None
             kv_cfg = vllm_config.kv_transfer_config
-            if kv_cfg is not None and kv_cfg.is_kv_producer:
+            sched_cfg = vllm_config.scheduler_config
+            par_cfg = vllm_config.parallel_config
+
+            is_prefill_node = kv_cfg is not None and kv_cfg.is_kv_producer
+            chunked_prefill_on = sched_cfg.enable_chunked_prefill
+            long_prefill_chunked = sched_cfg.long_prefill_token_threshold > 0
+            pp_on = par_cfg.pipeline_parallel_size > 1
+            async_on = bool(sched_cfg.async_scheduling)
+
+            scheduling_assumptions_hold = (
+                not chunked_prefill_on
+                and not long_prefill_chunked
+                and not pp_on
+                and not async_on
+            )
+
+            if is_prefill_node and scheduling_assumptions_hold:
                 from vllm.v1.core.sched.slo_monitor import SLOMonitor
 
                 self.slo_monitor = SLOMonitor(self.scheduler)
@@ -923,9 +949,15 @@ class EngineCoreProc(EngineCore):
             else:
                 kv_role = kv_cfg.kv_role if kv_cfg is not None else None
                 logger.info(
-                    "SLO monitor disabled: kv_role=%s (enabled only for "
-                    "kv_producer or kv_both)",
+                    "SLO monitor disabled: kv_role=%s chunked_prefill=%s "
+                    "long_prefill_chunked=%s pp=%d async_sched=%s "
+                    "(requires kv_producer/kv_both AND all scheduling "
+                    "assumptions to hold)",
                     kv_role,
+                    chunked_prefill_on,
+                    long_prefill_chunked,
+                    par_cfg.pipeline_parallel_size,
+                    async_on,
                 )
 
             # Don't complete handshake until DP coordinator ready message is
