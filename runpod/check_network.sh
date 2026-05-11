@@ -4,7 +4,11 @@
 
 REMOTE_IP="${1:?Usage: check_network.sh <remote_ip> [port1 port2 ...]}"
 shift
-PORTS=("${@:-8100 8200 10001 30001 22}")
+if [ "$#" -eq 0 ]; then
+    PORTS=(8100 8200 10001 30001 22)
+else
+    PORTS=("$@")
+fi
 
 echo "=== Local network interfaces ==="
 ip addr show | grep "inet " | awk '{print $2, $NF}'
