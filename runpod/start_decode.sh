@@ -10,9 +10,11 @@ KV_CONFIG=$(cat <<EOF
 EOF
 )
 
-python3 -m vllm.entrypoints.openai.api_server \
+nohup python3 -m vllm.entrypoints.openai.api_server \
     --model "$MODEL" \
     --host 0.0.0.0 \
     --port 8200 \
     --gpu-memory-utilization 0.8 \
-    --kv-transfer-config "$KV_CONFIG"
+    --kv-transfer-config "$KV_CONFIG" > /tmp/decode.log 2>&1 &
+echo $! > /tmp/decode.pid
+echo "Decode started (PID $!). Logs: tail -f /tmp/decode.log"

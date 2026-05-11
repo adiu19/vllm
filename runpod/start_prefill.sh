@@ -10,9 +10,11 @@ KV_CONFIG=$(cat <<EOF
 EOF
 )
 
-python3 -m vllm.entrypoints.openai.api_server \
+nohup python3 -m vllm.entrypoints.openai.api_server \
     --model "$MODEL" \
     --host 0.0.0.0 \
     --port 8100 \
     --gpu-memory-utilization 0.8 \
-    --kv-transfer-config "$KV_CONFIG"
+    --kv-transfer-config "$KV_CONFIG" > /tmp/prefill.log 2>&1 &
+echo $! > /tmp/prefill.pid
+echo "Prefill started (PID $!). Logs: tail -f /tmp/prefill.log"
