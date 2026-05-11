@@ -257,6 +257,15 @@ class Scheduler(SchedulerInterface):
 
         self._pause_state: PauseState = PauseState.UNPAUSED
 
+        # FlowPrefill: atomic snapshot for SLO monitor consumption. Lock-free
+        # via single-writer (this thread) + atomic ref swap. Gated on enabled
+        # flag so non-prefill nodes pay no cost.
+        # See vllm/v1/core/sched/slo_monitor.py.
+        from vllm.v1.core.sched.slo_monitor import SchedulerSnapshot
+
+        self._snapshot_enabled: bool = False
+        self._snapshot: SchedulerSnapshot | None = None
+
     def _mamba_block_aligned_split(
         self,
         request: Request,
@@ -900,6 +909,16 @@ class Scheduler(SchedulerInterface):
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
+
+        if self._snapshot_enabled:
+            from vllm.v1.core.sched.slo_monitor import SchedulerSnapshot
+
+            self._snapshot = SchedulerSnapshot(
+                waiting=list(self.waiting),
+                running=self.running.copy(),
+                snapshot_time=time.monotonic(),
+            )
+
         return scheduler_output
 
     def _build_kv_connector_meta(

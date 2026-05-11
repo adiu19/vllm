@@ -910,6 +910,24 @@ class EngineCoreProc(EngineCore):
             )
             self.output_thread.start()
 
+            # FlowPrefill: SLO monitor on prefill-capable nodes only.
+            # Gated on kv_role to skip pure decode nodes and standard
+            # non-disaggregated deployments where flow-prefill doesn't apply.
+            self.slo_monitor = None
+            kv_cfg = vllm_config.kv_transfer_config
+            if kv_cfg is not None and kv_cfg.is_kv_producer:
+                from vllm.v1.core.sched.slo_monitor import SLOMonitor
+
+                self.slo_monitor = SLOMonitor(self.scheduler)
+                self.slo_monitor.start()
+            else:
+                kv_role = kv_cfg.kv_role if kv_cfg is not None else None
+                logger.info(
+                    "SLO monitor disabled: kv_role=%s (enabled only for "
+                    "kv_producer or kv_both)",
+                    kv_role,
+                )
+
             # Don't complete handshake until DP coordinator ready message is
             # received.
             while not ready_event.wait(timeout=10):
