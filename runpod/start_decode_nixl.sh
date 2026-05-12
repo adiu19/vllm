@@ -17,6 +17,9 @@ nohup python3 -m vllm.entrypoints.openai.api_server \
     --port "$DECODE_PORT" \
     --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" \
     --gpu-memory-utilization 0.8 \
+    --no-enable-chunked-prefill \
+    --max-model-len 2048 \
+    --max-num-batched-tokens 2048 \
     --kv-transfer-config "$KV_CONFIG" > "$DECODE_LOG" 2>&1 &
 echo $! > /tmp/decode.pid
 echo "Decode (nixl) started (PID $!, GPUs $DECODE_GPUS, side-channel :${VLLM_NIXL_SIDE_CHANNEL_PORT}). Logs: tail -f $DECODE_LOG"
