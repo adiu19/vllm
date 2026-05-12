@@ -18,6 +18,7 @@ nohup python3 -m vllm.entrypoints.openai.api_server \
     --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" \
     --gpu-memory-utilization 0.8 \
     --no-enable-chunked-prefill \
+    --no-async-scheduling \
     --max-model-len 2048 \
     --max-num-batched-tokens 2048 \
     --kv-transfer-config "$KV_CONFIG" > "$DECODE_LOG" 2>&1 &

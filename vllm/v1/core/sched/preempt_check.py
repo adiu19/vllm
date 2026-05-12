@@ -38,6 +38,15 @@ def preempt_check_at_attention(layer_name: str) -> None:
     """
     global _invocation_count
 
+    # Skip during CUDA stream capture: vLLM captures CUDA graphs at warmup
+    # time (for uniform decode batches). Inside the capture context, any
+    # CPU-GPU sync (like `.item()`) raises `cudaErrorStreamCaptureUnsupported`.
+    # Our vote is meaningless during a dummy warmup batch anyway, and at
+    # replay time the captured graph runs without our Python check — which
+    # is the right semantic (we don't preempt decode batches).
+    if torch.cuda.is_current_stream_capturing():
+        return
+
     # TP may not be initialized very early in startup (before model creation
     # completes the parallel-state setup). Skip silently in that case.
     try:
