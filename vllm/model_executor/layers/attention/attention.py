@@ -713,6 +713,14 @@ def unified_attention_with_output(
     output_block_scale: torch.Tensor | None = None,
     kv_cache_dummy_dep: torch.Tensor | None = None,
 ) -> None:
+    # FlowPrefill: layer-boundary preemption check. Runs at every attention op
+    # call (once per transformer layer). 1-byte collective vote across TP
+    # workers — currently log-only, no actual preemption. Imported lazily to
+    # avoid pulling vllm/v1 dependencies during early attention module load.
+    from vllm.v1.core.sched.preempt_check import preempt_check_at_attention
+
+    preempt_check_at_attention(str(layer_name))
+
     # kv_cache_dummy_dep is not used but accepting it creates a data dependency
     # that ensures torch.compile preserves ordering between KV cache update and
     # attention forward.
