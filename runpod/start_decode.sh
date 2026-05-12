@@ -17,6 +17,7 @@ nohup python3 -m vllm.entrypoints.openai.api_server \
     --port "$DECODE_PORT" \
     --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" \
     --gpu-memory-utilization 0.8 \
+    --max-model-len 2048 \
     --kv-transfer-config "$KV_CONFIG" > "$DECODE_LOG" 2>&1 &
 echo $! > /tmp/decode.pid
 echo "Decode started (PID $!, GPUs $DECODE_GPUS). Logs: tail -f $DECODE_LOG"

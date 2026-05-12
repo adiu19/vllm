@@ -17,6 +17,9 @@ nohup python3 -m vllm.entrypoints.openai.api_server \
     --port "$PREFILL_PORT" \
     --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" \
     --gpu-memory-utilization 0.8 \
+    --no-enable-chunked-prefill \
+    --max-model-len 2048 \
+    --max-num-batched-tokens 2048 \
     --kv-transfer-config "$KV_CONFIG" > "$PREFILL_LOG" 2>&1 &
 echo $! > /tmp/prefill.pid
 echo "Prefill started (PID $!, GPUs $PREFILL_GPUS). Logs: tail -f $PREFILL_LOG"
