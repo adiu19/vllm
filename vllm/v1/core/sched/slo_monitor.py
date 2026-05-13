@@ -119,6 +119,49 @@ class TTFTPredictor:
         return self.a * num_prompt_tokens + self.c
 
 
+def _extract_per_request_slo_ms(request: "Request") -> float | None:
+    """Read FlowPrefill per-request SLO from the request's trace_headers.
+
+    The completion server stuffs the value of `X-FlowPrefill-SLO-MS` into
+    `trace_headers` under the lowercase key `x-flowprefill-slo-ms`. We're
+    abusing trace_headers (which is intended for OpenTelemetry) as a
+    generic header carrier to avoid schema changes. See Merge Plan.
+
+    Returns None if no header was set; caller falls back to the
+    server-side default.
+    """
+    headers = getattr(request, "trace_headers", None)
+    if not headers:
+        return None
+    raw = headers.get("x-flowprefill-slo-ms")
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        # Malformed header — fall back silently to default.
+        return None
+
+
+def compute_ttft_slo_ms(request: "Request | None" = None) -> float:
+    """SLO target in ms for a request.
+
+    Priority order:
+    1. Per-request override via `X-FlowPrefill-SLO-MS` header (read from
+       request.trace_headers).
+    2. Server-side default — currently the env-var-overridable
+       TTFT_SLO_BASE_MS constant.
+
+    Production-grade would replace step 2 with a tier-based lookup or a
+    linear-regression default (see Merge Plan).
+    """
+    if request is not None:
+        per_request = _extract_per_request_slo_ms(request)
+        if per_request is not None:
+            return per_request
+    return TTFT_SLO_BASE_MS
+
+
 def compute_request_priority(
     request: "Request", predictor: "TTFTPredictor | None" = None
 ) -> float:
@@ -134,24 +177,13 @@ def compute_request_priority(
     if predictor is None:
         predictor = TTFTPredictor()
     predicted_ttft_ms = predictor.predict_ms(request.num_prompt_tokens)
-    slo_ms = compute_ttft_slo_ms(request.num_prompt_tokens)
+    slo_ms = compute_ttft_slo_ms(request)
     deadline_s = request.arrival_time + slo_ms / 1000.0
     time_until_deadline_ms = (deadline_s - time.time()) * 1000.0
     slack_ms = time_until_deadline_ms - predicted_ttft_ms
     sign = 1.0 if slack_ms >= 0 else -1.0
     denom_ms = max(abs(time_until_deadline_ms), 1.0)
     return sign / denom_ms
-
-
-def compute_ttft_slo_ms(num_prompt_tokens: int, batch_size: int = 1) -> float:
-    """SLO target in ms. Parameterized signature for forward compatibility;
-    constant body for the logging milestone.
-
-    TODO: scale with prompt length once benchmarks vary it:
-        return TTFT_SLO_BASE_MS + k_ms_per_token * num_prompt_tokens
-    """
-    del num_prompt_tokens, batch_size
-    return TTFT_SLO_BASE_MS
 
 
 class PreemptPolicy:
@@ -392,7 +424,7 @@ class SLOMonitor:
         arrival_time = request.arrival_time
 
         predicted_ttft_ms = self._predictor.predict_ms(num_prompt_tokens)
-        slo_ms = compute_ttft_slo_ms(num_prompt_tokens)
+        slo_ms = compute_ttft_slo_ms(request)
         deadline_s = arrival_time + slo_ms / 1000.0
 
         # arrival_time is wall-clock (time.time); keep slack computation in the

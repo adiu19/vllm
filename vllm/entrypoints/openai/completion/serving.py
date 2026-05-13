@@ -180,6 +180,22 @@ class OpenAIServingCompletion(OpenAIServing):
                 else await self._get_trace_headers(raw_request.headers)
             )
 
+            # FlowPrefill: extract per-request SLO from a custom header,
+            # independent of whether OpenTelemetry tracing is enabled. We
+            # piggyback on the existing trace_headers Mapping[str, str]
+            # plumbing rather than adding new schema fields. Production-
+            # grade would add a dedicated field or map service_tier →
+            # SLO; tracked in Merge Plan.
+            if raw_request is not None:
+                slo_header_value = raw_request.headers.get(
+                    "X-FlowPrefill-SLO-MS"
+                )
+                if slo_header_value is not None:
+                    trace_headers = {
+                        **(trace_headers or {}),
+                        "x-flowprefill-slo-ms": slo_header_value,
+                    }
+
             if isinstance(sampling_params, BeamSearchParams):
                 generator = self.beam_search(
                     prompt=engine_input,
