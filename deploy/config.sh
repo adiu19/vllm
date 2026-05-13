@@ -34,4 +34,4 @@ export DECODE_LOG=/tmp/decode.log
 export PROXY_LOG=/tmp/proxy.log
 export STANDALONE_LOG=/tmp/standalone.log
 
-export EXTRA_VLLM_FLAGS="--no-enable-chunked-prefill --no-async-scheduling --max-model-len 2048 --max-num-batched-tokens 2048"
+export EXTRA_VLLM_FLAGS="--no-enable-chunked-prefill --no-async-scheduling --max-model-len 2048 --max-num-batched-tokens 8192"
