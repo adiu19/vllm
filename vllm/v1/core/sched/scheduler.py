@@ -316,7 +316,16 @@ class Scheduler(SchedulerInterface):
                 pass
         return num_new_tokens
 
-    def schedule(self) -> SchedulerOutput:
+    def schedule(self, step_id: int = -1) -> SchedulerOutput:
+        # FlowPrefill: reorder the waiting queue by SLO priority before
+        # admission. Without this, after a preempt the just-preempted
+        # request (prepended to waiting by _preempt_request) would be
+        # re-admitted in FCFS order, causing thrash. Gated on
+        # _snapshot_enabled — same flag the SLO monitor uses, so admission
+        # heapify only happens when FlowPrefill is active on this node.
+        if self._snapshot_enabled and len(self.waiting) > 1:
+            self._heapify_waiting_by_slo()
+
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -890,6 +899,7 @@ class Scheduler(SchedulerInterface):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
+            step_id=step_id,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -917,6 +927,7 @@ class Scheduler(SchedulerInterface):
                 waiting=list(self.waiting),
                 running=self.running.copy(),
                 snapshot_time=time.monotonic(),
+                step_id=step_id,
             )
 
         return scheduler_output
@@ -925,6 +936,28 @@ class Scheduler(SchedulerInterface):
         self, connector: KVConnectorBase_V1, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         return connector.build_connector_meta(scheduler_output)
+
+    def _heapify_waiting_by_slo(self) -> None:
+        """Reorder self.waiting by S-EDF priority (highest first).
+
+        Called at the start of each schedule() when FlowPrefill is active.
+        Uses the same priority formula as the SLO monitor so the monitor's
+        preempt-intent judgments and the scheduler's admission judgments
+        agree. O(n log n) per call; negligible for typical waiting-queue
+        sizes. See Race Conditions.md #11 (heap staleness is acceptable
+        because we re-heapify each step).
+        """
+        from vllm.v1.core.sched.slo_monitor import compute_request_priority
+
+        # FCFSRequestQueue is a deque subclass; sort by building a list,
+        # ordering by priority desc, then re-extending.
+        sorted_requests = sorted(
+            list(self.waiting),
+            key=compute_request_priority,
+            reverse=True,
+        )
+        self.waiting.clear()
+        self.waiting.extend(sorted_requests)
 
     def _preempt_request(self, request: Request, timestamp: float) -> None:
         """Preempt a request and put it back to the waiting queue.

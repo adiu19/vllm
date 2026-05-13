@@ -32,6 +32,7 @@ from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.utils import numa_utils
+from vllm.utils.system_utils import get_mp_context
 from vllm.utils.gc_utils import (
     freeze_gc_heap,
     maybe_attach_gc_debug_callback,
@@ -114,8 +115,31 @@ class EngineCore:
 
         self.log_stats = log_stats
 
+        # FlowPrefill: monotonic step counter. Incremented at the start of
+        # each step(); used to scope preempt signals (Race Conditions.md #2).
+        self._step_id = 0
+
+        # FlowPrefill: process-shared preempt target. Set by the SLO monitor
+        # to the step_id it wants to preempt. Workers compare against their
+        # current step_id at every attention op. -1 means no outstanding
+        # preempt. Stale values (e.g. target of a finished step) are
+        # naturally ignored — no clear/reset needed.
+        # See General/intra-process data transfer.md for the shared-memory
+        # mechanics; see Race Conditions.md for the design rationale.
+        self.preempt_target_step_id = get_mp_context().Value("i", -1)
+
         # Setup Model.
-        self.model_executor = executor_class(vllm_config)
+        # FlowPrefill: pass preempt_target only to MultiprocExecutor. Other
+        # executor types (UniProc, Ray, ExternalLauncher) don't support the
+        # process-shared signaling path yet — see FlowPrefill Merge Plan.
+        from vllm.v1.executor.multiproc_executor import MultiprocExecutor
+
+        if issubclass(executor_class, MultiprocExecutor):
+            self.model_executor = executor_class(
+                vllm_config, preempt_target_step_id=self.preempt_target_step_id
+            )
+        else:
+            self.model_executor = executor_class(vllm_config)
         if executor_fail_callback is not None:
             self.model_executor.register_failure_callback(executor_fail_callback)
 
@@ -410,16 +434,42 @@ class EngineCore:
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
-        scheduler_output = self.scheduler.schedule()
+        # FlowPrefill: increment step_id before scheduling so this step
+        # carries a fresh, monotonic ID. Passed into schedule() so the
+        # scheduler attaches it atomically to both SchedulerOutput and
+        # SchedulerSnapshot (Race Conditions.md #2).
+        self._step_id += 1
+        scheduler_output = self.scheduler.schedule(step_id=self._step_id)
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
-        with (
-            self.log_error_detail(scheduler_output),
-            self.log_iteration_details(scheduler_output),
-        ):
-            model_output = future.result()
-            if model_output is None:
-                model_output = self.model_executor.sample_tokens(grammar_output)
+
+        # FlowPrefill: import locally to avoid circular import.
+        from vllm.v1.core.sched.preempt_check import PreemptionException
+
+        try:
+            with (
+                self.log_error_detail(scheduler_output),
+                self.log_iteration_details(scheduler_output),
+            ):
+                model_output = future.result()
+                if model_output is None:
+                    model_output = self.model_executor.sample_tokens(grammar_output)
+        except PreemptionException as e:
+            # The TP-wide preempt vote returned 1; one or more workers
+            # raised. Release the in-flight batch's running requests back
+            # to the waiting queue (this frees their KV cache blocks via
+            # the existing scheduler.preempt() machinery). The next step()
+            # call will run schedule() fresh — and with SLO-aware admission
+            # the high-priority waiting request gets admitted.
+            # See Race Conditions.md #16/#17.
+            logger.info(
+                "FlowPrefill: caught PreemptionException for step_id=%d "
+                "layer=%s — releasing in-flight requests",
+                e.step_id,
+                e.layer_name,
+            )
+            self._handle_preemption(scheduler_output)
+            return {}, False
 
         # Before processing the model output, process any aborts that happened
         # during the model execution.
@@ -428,7 +478,35 @@ class EngineCore:
             scheduler_output, model_output
         )
 
+        # FlowPrefill: no explicit clear of preempt_target_step_id. With the
+        # batch-ID design (Race Conditions.md), stale values are naturally
+        # ignored by future steps (their step_id won't match the stale target).
+        # Monitor writes a new target if/when it decides to preempt again.
+
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
+
+    def _handle_preemption(self, scheduler_output: SchedulerOutput) -> None:
+        """Release the in-flight batch's running requests after a TP-wide
+        preempt vote. Calls the scheduler's existing _preempt_request
+        machinery — same path used for memory-pressure preemption.
+
+        Run synchronously inside step()'s exception handler so the scheduler
+        is in a consistent state before step() returns. See Race Conditions.md
+        #8 (re-entry safety relies on this being synchronous).
+        """
+        timestamp = time.time()
+        # Identify which running requests were part of the preempted step.
+        # The scheduler_output gives us req_ids that had scheduled tokens.
+        scheduled_req_ids = set(scheduler_output.num_scheduled_tokens.keys())
+        # Pop affected requests from the running queue and preempt them.
+        # Walk running by index in reverse so removals don't shift later
+        # indices we still care about.
+        running = self.scheduler.running
+        for i in range(len(running) - 1, -1, -1):
+            request = running[i]
+            if request.request_id in scheduled_req_ids:
+                running.pop(i)
+                self.scheduler._preempt_request(request, timestamp)
 
     def post_step(self, model_executed: bool) -> None:
         # When using async scheduling we can't get draft token ids in advance,
@@ -569,6 +647,15 @@ class EngineCore:
             self.abort_requests(request_ids)
 
     def shutdown(self):
+        # FlowPrefill: stop the SLO monitor BEFORE the executor is torn
+        # down. Monitor reads scheduler snapshots and writes into the
+        # shared preempt_target_step_id mp.Value — both of which lose
+        # validity when the executor tears down workers and frees shm.
+        # See Race Conditions.md #9 (shutdown ordering).
+        slo_monitor = getattr(self, "slo_monitor", None)
+        if slo_monitor is not None:
+            slo_monitor.stop()
+
         self.structured_output_manager.clear_backend()
         if self.model_executor:
             self.model_executor.shutdown()
@@ -944,7 +1031,9 @@ class EngineCoreProc(EngineCore):
             if is_prefill_node and scheduling_assumptions_hold:
                 from vllm.v1.core.sched.slo_monitor import SLOMonitor
 
-                self.slo_monitor = SLOMonitor(self.scheduler)
+                self.slo_monitor = SLOMonitor(
+                    self.scheduler, self.preempt_target_step_id
+                )
                 self.slo_monitor.start()
             else:
                 kv_role = kv_cfg.kv_role if kv_cfg is not None else None

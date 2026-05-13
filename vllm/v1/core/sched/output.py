@@ -232,6 +232,13 @@ class SchedulerOutput:
     # KV Cache Connector metadata.
     kv_connector_metadata: KVConnectorMetadata | None = None
 
+    # FlowPrefill: monotonic step counter, set by engine core. Workers store
+    # this locally at the start of each forward pass; preempt_check compares
+    # it against the SLO monitor's preempt target. -1 = unset (non-FlowPrefill
+    # path). See General/intra-process data transfer.md and
+    # Flow Prefill/Race Conditions.md.
+    step_id: int = -1
+
     # EC Cache Connector metadata
     ec_connector_metadata: ECConnectorMetadata | None = None
 

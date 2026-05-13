@@ -10,6 +10,7 @@ should displace a running one.
 Logging milestone: emits intent only; does not act on the scheduler.
 """
 
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -33,9 +34,14 @@ TTFT_COEFF_A_MS_PER_TOKEN = 0.21
 TTFT_COEFF_C_MS = 20.0
 
 # SLO target.
+# Overridable via env var FLOWPREFILL_SLO_BASE_MS for validation runs — lets
+# us lower the SLO below normal TTFT so a regular request will breach it
+# without needing artificially slow prompts. Set in deploy/config.sh.
 # TODO: make this a function of num_prompt_tokens once we vary prompt lengths
 # in the benchmark — base_ms + k_ms_per_token * num_prompt_tokens.
-TTFT_SLO_BASE_MS = 500.0
+# TODO: replace env var with proper config plumbing before upstream merge
+# (see FlowPrefill Merge Plan).
+TTFT_SLO_BASE_MS = float(os.environ.get("FLOWPREFILL_SLO_BASE_MS", "500.0"))
 
 # Preemption decision margin. Trigger intent when top_waiting.priority exceeds
 # bottom_running.priority by this factor. Avoids thrashing on near-equal
@@ -64,6 +70,10 @@ class SchedulerSnapshot:
     waiting: list["Request"] = field(default_factory=list)
     running: list["Request"] = field(default_factory=list)
     snapshot_time: float = 0.0  # time.monotonic() when snapshot was built
+    # FlowPrefill: step_id this snapshot corresponds to. Set by the scheduler
+    # atomically with snapshot publication (see Race Conditions.md #2).
+    # Monitor uses this to scope its preempt target to a specific step.
+    step_id: int = -1
 
 
 @dataclass
@@ -102,6 +112,30 @@ class TTFTPredictor:
         return self.a * num_prompt_tokens + self.c
 
 
+def compute_request_priority(
+    request: "Request", predictor: "TTFTPredictor | None" = None
+) -> float:
+    """S-EDF priority for a request, shared between SLOMonitor and the
+    scheduler's SLO-aware admission heapify (Phase 5).
+
+    Mirrors `SLOMonitor._evaluate`'s priority math so the monitor's
+    snapshot-time judgment and the scheduler's admission-time judgment agree
+    on which waiting request is most urgent.
+
+    Higher priority = more urgent.
+    """
+    if predictor is None:
+        predictor = TTFTPredictor()
+    predicted_ttft_ms = predictor.predict_ms(request.num_prompt_tokens)
+    slo_ms = compute_ttft_slo_ms(request.num_prompt_tokens)
+    deadline_s = request.arrival_time + slo_ms / 1000.0
+    time_until_deadline_ms = (deadline_s - time.time()) * 1000.0
+    slack_ms = time_until_deadline_ms - predicted_ttft_ms
+    sign = 1.0 if slack_ms >= 0 else -1.0
+    denom_ms = max(abs(time_until_deadline_ms), 1.0)
+    return sign / denom_ms
+
+
 def compute_ttft_slo_ms(num_prompt_tokens: int, batch_size: int = 1) -> float:
     """SLO target in ms. Parameterized signature for forward compatibility;
     constant body for the logging milestone.
@@ -115,22 +149,28 @@ def compute_ttft_slo_ms(num_prompt_tokens: int, batch_size: int = 1) -> float:
 
 class SLOMonitor:
     """Background monitor that evaluates slack-aware urgency every poll tick
-    and logs preempt intent.
+    and signals preempt intent.
 
-    The monitor never mutates scheduler state. When preemption is wired in
-    later, it will set a threading.Event the main thread checks at layer
-    boundaries — the main thread does the actual preemption with its own
-    consistent view of scheduler state.
+    The monitor never mutates scheduler state. When it decides a waiting
+    request should displace a running one, it writes the snapshot's step_id
+    into the process-shared `preempt_target_step_id` (an mp.Value). Worker
+    processes read that value at every attention op boundary (see
+    `preempt_check.py`), compare against their current step_id, and
+    contribute to a TP collective vote. Stale targets (whose step has
+    finished) are naturally ignored by future steps — no clear/reset
+    needed. See Race Conditions.md for the full design rationale.
     """
 
     def __init__(
         self,
         scheduler: "Scheduler",
+        preempt_target_step_id,
         poll_interval_s: float = MONITOR_POLL_INTERVAL_S,
         heartbeat_interval_s: float = HEARTBEAT_INTERVAL_S,
         preempt_margin: float = PREEMPT_MARGIN,
     ) -> None:
         self._scheduler = scheduler
+        self._preempt_target_step_id = preempt_target_step_id
         self._predictor = TTFTPredictor()
         self._poll_interval_s = poll_interval_s
         self._heartbeat_interval_s = heartbeat_interval_s
@@ -199,11 +239,20 @@ class SLOMonitor:
         # request trivially beats it. When both are positive, we require
         # top_waiting to be at least margin times more urgent.
         if top_waiting.priority > bottom_running.priority * self._preempt_margin:
+            # Signal preempt to the worker processes. Write the snapshot's
+            # step_id (the step currently running) into the shared value.
+            # Workers observe this at their next attention op, compare
+            # against their current step_id, and the TP all_reduce
+            # propagates the vote. Stale targets are ignored by later
+            # steps (Race Conditions.md). No clear/reset by engine core.
+            self._preempt_target_step_id.value = snap.step_id
             logger.info(
-                "PREEMPT INTENT: waiting %s (tokens=%d slack=%.1fms "
+                "PREEMPT INTENT (signaled step_id=%d): waiting %s "
+                "(tokens=%d slack=%.1fms "
                 "ttft_pred=%.1fms prio=%.4g) would displace running %s "
                 "(tokens=%d slack=%.1fms ttft_pred=%.1fms prio=%.4g) "
                 "[margin=%.2fx, snapshot_age=%.1fms]",
+                snap.step_id,
                 top_waiting.request_id,
                 top_waiting.num_prompt_tokens,
                 top_waiting.slack_ms,

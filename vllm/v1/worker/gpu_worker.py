@@ -783,6 +783,15 @@ class Worker(WorkerBase):
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        # FlowPrefill: register this step's id so preempt_check_at_attention
+        # can compare against the SLO monitor's preempt target. See
+        # Race Conditions.md #14 (worker-local set_current_step_id race) —
+        # this update runs before any attention op in the forward pass, so
+        # there's no window where attention reads a stale step_id.
+        from vllm.v1.core.sched.preempt_check import set_current_step_id
+
+        set_current_step_id(scheduler_output.step_id)
+
         # ensure any previous non-blocking PP sends are complete
         if self._pp_send_work:
             for handle in self._pp_send_work:

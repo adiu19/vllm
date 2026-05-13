@@ -102,8 +102,20 @@ class FutureWrapper(Future):
 class MultiprocExecutor(Executor):
     supports_pp: bool = True
 
-    def __init__(self, vllm_config: VllmConfig, monitor_workers: bool = True):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        monitor_workers: bool = True,
+        preempt_target_step_id=None,
+    ):
         self.monitor_workers = monitor_workers
+        # FlowPrefill: process-shared int (mp.Value('i')) holding the step_id
+        # the SLO monitor wants to preempt. Workers compare it against their
+        # current step_id at attention op boundaries. None on non-prefill
+        # nodes (SLO monitor disabled).
+        # Must be stored before super().__init__() since _init_executor()
+        # runs during base construction and spawns the workers.
+        self.preempt_target_step_id = preempt_target_step_id
         super().__init__(vllm_config)
 
     def _init_executor(self) -> None:
@@ -187,6 +199,7 @@ class MultiprocExecutor(Executor):
                         shared_worker_lock=shared_worker_lock,
                         is_driver_worker=is_driver_worker,
                         inherited_fds=inherited_fds,
+                        preempt_target_step_id=self.preempt_target_step_id,
                     )
                 unready_workers.append(unready_worker_handle)
                 if inherited_fds is not None:
@@ -585,8 +598,18 @@ class WorkerProc:
         input_shm_handle: Handle,
         shared_worker_lock: LockType,
         is_driver_worker: bool,
+        preempt_target_step_id=None,
     ):
         self.rank = rank
+        # FlowPrefill: register the process-shared preempt target into the
+        # preempt_check module before any model code runs. From here on,
+        # preempt_check_at_attention reads `preempt_target_step_id.value`
+        # and compares to the worker's current step_id. None on non-prefill
+        # nodes — module falls back to vote=0.
+        if preempt_target_step_id is not None:
+            from vllm.v1.core.sched.preempt_check import set_preempt_target
+
+            set_preempt_target(preempt_target_step_id)
         wrapper = WorkerWrapperBase(rpc_rank=local_rank, global_rank=rank)
         # TODO: move `init_worker` to executor level as a collective rpc call
         all_kwargs: list[dict] = [
@@ -650,6 +673,7 @@ class WorkerProc:
         shared_worker_lock: LockType,
         is_driver_worker: bool,
         inherited_fds: list[int] | None = None,
+        preempt_target_step_id=None,
     ) -> UnreadyWorkerProcHandle:
         context = get_mp_context()
         # Ready pipe to communicate readiness from child to parent
@@ -671,6 +695,11 @@ class WorkerProc:
             "is_driver_worker": is_driver_worker,
             # Have the worker close parent end of this worker's pipes too
             "inherited_fds": inherited_fds if inherited_fds is not None else [],
+            # FlowPrefill: process-shared preempt target (mp.Value('i')).
+            # Pickled by spawn, rehydrates in the child to a reference into
+            # the same underlying POSIX shm-backed int. SLO monitor writes
+            # the step_id to preempt; workers compare to their current step.
+            "preempt_target_step_id": preempt_target_step_id,
         }
         # Run EngineCore busy loop in background process.
         proc = context.Process(
