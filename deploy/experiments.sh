@@ -9,7 +9,7 @@
 #
 # To repoint a mode at a different branch:
 #   1. Edit the case entry below
-#   2. Commit and push to all branches you might init.sh from
+#   2. Commit and push to every branch we might init.sh from
 #      (init.sh reads experiments.sh from whatever's currently checked out)
 
 case "$MODE" in

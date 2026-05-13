@@ -5,8 +5,8 @@
 # for 10 minutes waiting on a 401.
 #
 # Usage:
-#   bash /opt/vllm-fork/runpod/verify_hf_auth.sh
-#   bash /opt/vllm-fork/runpod/verify_hf_auth.sh meta-llama/Meta-Llama-3.1-70B-Instruct
+#   bash /opt/vllm-fork/deploy/verify_hf_auth.sh
+#   bash /opt/vllm-fork/deploy/verify_hf_auth.sh meta-llama/Meta-Llama-3.1-70B-Instruct
 
 set -e
 
@@ -15,7 +15,7 @@ if [ -f /tmp/config.sh ]; then
     source /tmp/config.sh
 fi
 
-# Fall back to saved CLI login if no env var set
+# Fall back to saved CLI login if no env var is set
 if [ -z "${HF_TOKEN:-}" ] && [ -f ~/.cache/huggingface/token ]; then
     export HF_TOKEN=$(cat ~/.cache/huggingface/token)
     echo "Using token from ~/.cache/huggingface/token"
@@ -24,7 +24,7 @@ fi
 if [ -z "${HF_TOKEN:-}" ]; then
     echo "ERROR: HF_TOKEN not set. Gated models (Llama, Mistral, etc.) will hang on download."
     echo "Set it in RunPod's pod environment variables, or:"
-    echo "  export HF_TOKEN=hf_YOUR_TOKEN_HERE"
+    echo "  export HF_TOKEN=hf_TOKEN_VALUE"
     exit 1
 fi
 
@@ -51,7 +51,7 @@ if [ -n "$MODEL" ]; then
         "https://huggingface.co/api/models/${MODEL}")
     if [ "$MODEL_CODE" != "200" ]; then
         echo "ERROR: Cannot access $MODEL (HTTP $MODEL_CODE)."
-        echo "Likely you haven't accepted the model's license on HuggingFace yet."
+        echo "Model license likely not accepted on HuggingFace yet."
         echo "Visit: https://huggingface.co/${MODEL} and click 'Agree and access'."
         exit 1
     fi

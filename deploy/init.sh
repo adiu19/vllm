@@ -87,7 +87,7 @@ if [ -n "${MODEL:-}" ]; then
         "https://huggingface.co/api/models/${MODEL}")
     if [ "$MODEL_CODE" != "200" ]; then
         echo "ERROR: cannot access model '$MODEL' (HTTP $MODEL_CODE)" >&2
-        echo "Likely you haven't accepted its license. Visit:" >&2
+        echo "License likely not accepted yet. Visit and click 'Agree and access':" >&2
         echo "  https://huggingface.co/${MODEL}" >&2
         exit 1
     fi

@@ -58,6 +58,8 @@ RUN VLLM_USE_PRECOMPILED=1 \
 # Entrypoint wrapper. Thin glue that delegates to deploy/init.sh. Baked into
 # the image; rarely changes. The actual init logic lives in deploy/init.sh
 # which is pulled fresh on every container start.
+# COPY path is relative to the build context — run docker build from the
+# repo root with `-f deploy/Dockerfile`.
 COPY deploy/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
