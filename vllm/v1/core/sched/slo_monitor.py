@@ -74,6 +74,13 @@ class SchedulerSnapshot:
     # atomically with snapshot publication (see Race Conditions.md #2).
     # Monitor uses this to scope its preempt target to a specific step.
     step_id: int = -1
+    # FlowPrefill: req_ids that are in the CURRENT step's forward pass
+    # (i.e. keys of scheduler_output.num_scheduled_tokens). Monitor uses
+    # this to distinguish in-batch vs not-in-batch running requests so it
+    # can route the preempt action correctly:
+    #   - in-batch target  → abort the forward pass (mp.Value step_id)
+    #   - not-in-batch target → scheduler-level removal, no abort needed
+    current_batch_req_ids: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -147,30 +154,123 @@ def compute_ttft_slo_ms(num_prompt_tokens: int, batch_size: int = 1) -> float:
     return TTFT_SLO_BASE_MS
 
 
+class PreemptPolicy:
+    """Strategy for deciding which request (if any) to preempt.
+
+    Returns the `RequestEvaluation` of the chosen victim, or None for
+    "no preempt this tick." Two implementations:
+
+    - `ConservativePolicy` (default): preempt only when even the BEST
+      running request is less urgent than the top waiting (margin-adjusted).
+      Treats preemption as exception, not norm. Avoids regressing throughput
+      under load — preempts happen only when truly justified.
+
+    - `AggressivePolicy` (paper's S-EDF): preempt when the worst running
+      is beaten by the top waiting. Preempts happen often; more sensitive
+      to SLO breaches but more thrash-prone.
+
+    The policy is injected at SLOMonitor construction. Default is
+    conservative; switch to aggressive only when explicitly desired.
+    """
+
+    def decide(
+        self,
+        waiting_evals: list[RequestEvaluation],
+        running_evals: list[RequestEvaluation],
+        margin: float,
+    ) -> RequestEvaluation | None:
+        raise NotImplementedError
+
+
+class ConservativePolicy(PreemptPolicy):
+    """Default. Preempt only if top_waiting beats best_running by margin.
+
+    Reasoning: if the BEST request currently running is more urgent than
+    the most urgent waiting, no preempt is justified. Only when even the
+    best running is less urgent does waiting truly deserve to displace it.
+    Once that condition holds, pick the worst-priority running as the
+    expendable victim.
+    """
+
+    def decide(
+        self,
+        waiting_evals: list[RequestEvaluation],
+        running_evals: list[RequestEvaluation],
+        margin: float,
+    ) -> RequestEvaluation | None:
+        top_waiting = max(waiting_evals, key=lambda e: e.priority)
+        best_running = max(running_evals, key=lambda e: e.priority)
+        if top_waiting.priority > best_running.priority * margin:
+            return min(running_evals, key=lambda e: e.priority)
+        return None
+
+
+class AggressivePolicy(PreemptPolicy):
+    """Paper's S-EDF. Preempt if top_waiting beats bottom_running by margin.
+
+    More sensitive to SLO breaches, but causes more preempts and
+    higher thrash risk under load. Kept as an injectable alternative
+    for benchmark comparisons against the conservative default.
+    """
+
+    def decide(
+        self,
+        waiting_evals: list[RequestEvaluation],
+        running_evals: list[RequestEvaluation],
+        margin: float,
+    ) -> RequestEvaluation | None:
+        top_waiting = max(waiting_evals, key=lambda e: e.priority)
+        bottom_running = min(running_evals, key=lambda e: e.priority)
+        if top_waiting.priority > bottom_running.priority * margin:
+            return bottom_running
+        return None
+
+
 class SLOMonitor:
     """Background monitor that evaluates slack-aware urgency every poll tick
     and signals preempt intent.
 
-    The monitor never mutates scheduler state. When it decides a waiting
-    request should displace a running one, it writes the snapshot's step_id
-    into the process-shared `preempt_target_step_id` (an mp.Value). Worker
-    processes read that value at every attention op boundary (see
-    `preempt_check.py`), compare against their current step_id, and
-    contribute to a TP collective vote. Stale targets (whose step has
-    finished) are naturally ignored by future steps — no clear/reset
-    needed. See Race Conditions.md for the full design rationale.
+    The monitor never mutates scheduler state directly. When it decides to
+    preempt a running request, it routes the action based on whether the
+    target is in the current step's forward pass:
+
+    - **Target in current batch**: writes the snapshot's step_id into the
+      process-shared `preempt_target_step_id` (mp.Value). Worker processes
+      read it at every attention op, compare to their current step_id, and
+      raise PreemptionException through a TP collective vote. The forward
+      pass aborts mid-flight.
+
+    - **Target NOT in current batch**: pushes the target's request_id onto
+      a scheduler-level preempt queue. Engine core drains this queue
+      before the next `schedule()` call and removes the target from
+      running without touching the forward pass. Cheap — no abort needed.
+
+    The choice of which running request to preempt is delegated to a
+    `PreemptPolicy` (Conservative by default; Aggressive available for
+    benchmark comparison).
+
+    See Race Conditions.md and Decisions.md for the full design rationale.
     """
 
     def __init__(
         self,
         scheduler: "Scheduler",
         preempt_target_step_id,
+        pending_scheduler_preempts=None,
+        policy: PreemptPolicy | None = None,
         poll_interval_s: float = MONITOR_POLL_INTERVAL_S,
         heartbeat_interval_s: float = HEARTBEAT_INTERVAL_S,
         preempt_margin: float = PREEMPT_MARGIN,
     ) -> None:
         self._scheduler = scheduler
         self._preempt_target_step_id = preempt_target_step_id
+        # Thread-safe queue (queue.Queue) of req_ids that the monitor wants
+        # the engine core to preempt at the scheduler level (not in batch
+        # → no abort needed). Engine core drains this at the top of step().
+        # If None, scheduler-level preempts are not supported (degrades to
+        # always-abort mode).
+        self._pending_scheduler_preempts = pending_scheduler_preempts
+        self._policy = policy if policy is not None else ConservativePolicy()
         self._predictor = TTFTPredictor()
         self._poll_interval_s = poll_interval_s
         self._heartbeat_interval_s = heartbeat_interval_s
@@ -231,45 +331,61 @@ class SLOMonitor:
             self._maybe_heartbeat(now_monotonic, snap, waiting_evals, running_evals)
             return
 
-        top_waiting = max(waiting_evals, key=lambda e: e.priority)
-        bottom_running = min(running_evals, key=lambda e: e.priority)
+        # Delegate the decision to the injected policy. Default
+        # (Conservative): preempt only if top_waiting beats best_running.
+        target = self._policy.decide(
+            waiting_evals, running_evals, self._preempt_margin
+        )
 
-        # The margin check is sign-aware: when bottom_running has negative
-        # priority (already missing SLO), any positive-priority waiting
-        # request trivially beats it. When both are positive, we require
-        # top_waiting to be at least margin times more urgent.
-        if top_waiting.priority > bottom_running.priority * self._preempt_margin:
-            # Signal preempt to the worker processes. Write the snapshot's
-            # step_id (the step currently running) into the shared value.
-            # Workers observe this at their next attention op, compare
-            # against their current step_id, and the TP all_reduce
-            # propagates the vote. Stale targets are ignored by later
-            # steps (Race Conditions.md). No clear/reset by engine core.
-            self._preempt_target_step_id.value = snap.step_id
-            logger.info(
-                "PREEMPT INTENT (signaled step_id=%d): waiting %s "
-                "(tokens=%d slack=%.1fms "
-                "ttft_pred=%.1fms prio=%.4g) would displace running %s "
-                "(tokens=%d slack=%.1fms ttft_pred=%.1fms prio=%.4g) "
-                "[margin=%.2fx, snapshot_age=%.1fms]",
-                snap.step_id,
-                top_waiting.request_id,
-                top_waiting.num_prompt_tokens,
-                top_waiting.slack_ms,
-                top_waiting.predicted_ttft_ms,
-                top_waiting.priority,
-                bottom_running.request_id,
-                bottom_running.num_prompt_tokens,
-                bottom_running.slack_ms,
-                bottom_running.predicted_ttft_ms,
-                bottom_running.priority,
-                self._preempt_margin,
-                (now_monotonic - snap.snapshot_time) * 1000.0,
-            )
-        else:
+        if target is None:
             self._maybe_heartbeat(
                 now_monotonic, snap, waiting_evals, running_evals
             )
+            return
+
+        top_waiting = max(waiting_evals, key=lambda e: e.priority)
+        target_in_batch = target.request_id in snap.current_batch_req_ids
+
+        if target_in_batch:
+            # In-batch preempt: target is being processed RIGHT NOW.
+            # Trigger forward-pass abort via the existing mp.Value path.
+            # Workers will see step_id match → all_reduce vote=1 → raise.
+            self._preempt_target_step_id.value = snap.step_id
+            log_route = "abort"
+        else:
+            # Not-in-batch preempt: target is in running but not in this
+            # step's forward pass. No abort needed — push to engine core's
+            # scheduler-level preempt queue, which drains before the next
+            # schedule(). Cheap path. Falls back to logging only if the
+            # queue wasn't provided (e.g. older config).
+            if self._pending_scheduler_preempts is not None:
+                self._pending_scheduler_preempts.put(target.request_id)
+                log_route = "scheduler-level"
+            else:
+                log_route = "noop (queue unavailable)"
+
+        logger.info(
+            "PREEMPT INTENT (route=%s, step_id=%d): waiting %s "
+            "(tokens=%d slack=%.1fms ttft_pred=%.1fms prio=%.4g) "
+            "would displace running %s "
+            "(tokens=%d slack=%.1fms ttft_pred=%.1fms prio=%.4g) "
+            "[in_batch=%s, margin=%.2fx, snapshot_age=%.1fms]",
+            log_route,
+            snap.step_id,
+            top_waiting.request_id,
+            top_waiting.num_prompt_tokens,
+            top_waiting.slack_ms,
+            top_waiting.predicted_ttft_ms,
+            top_waiting.priority,
+            target.request_id,
+            target.num_prompt_tokens,
+            target.slack_ms,
+            target.predicted_ttft_ms,
+            target.priority,
+            target_in_batch,
+            self._preempt_margin,
+            (now_monotonic - snap.snapshot_time) * 1000.0,
+        )
 
     def _evaluate(self, request: "Request") -> RequestEvaluation:
         num_prompt_tokens = request.num_prompt_tokens

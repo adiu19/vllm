@@ -928,6 +928,9 @@ class Scheduler(SchedulerInterface):
                 running=self.running.copy(),
                 snapshot_time=time.monotonic(),
                 step_id=step_id,
+                # Snapshot the current-batch membership so the SLO monitor
+                # can distinguish in-batch vs not-in-batch running requests.
+                current_batch_req_ids=set(scheduler_output.num_scheduled_tokens.keys()),
             )
 
         return scheduler_output

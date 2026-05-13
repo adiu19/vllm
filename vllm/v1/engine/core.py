@@ -128,6 +128,15 @@ class EngineCore:
         # mechanics; see Race Conditions.md for the design rationale.
         self.preempt_target_step_id = get_mp_context().Value("i", -1)
 
+        # FlowPrefill: queue of req_ids that the SLO monitor wants
+        # preempted at the scheduler level (no forward-pass abort needed
+        # — used when the target is NOT in the current batch). Engine
+        # core drains this at the top of each step(), removing the named
+        # requests from `running` and freeing their KV via the existing
+        # _preempt_request machinery. Thread-safe because the monitor
+        # writes from its background thread; main thread drains.
+        self._pending_scheduler_preempts: queue.Queue[str] = queue.Queue()
+
         # Setup Model.
         # FlowPrefill: pass preempt_target only to MultiprocExecutor. Other
         # executor types (UniProc, Ray, ExternalLauncher) don't support the
@@ -442,6 +451,11 @@ class EngineCore:
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
+        # FlowPrefill: drain any scheduler-level preempts the SLO monitor
+        # queued since the last step. These are requests in running but
+        # NOT in the previous step's batch, so they can be preempted
+        # without aborting any forward pass. Cheap path.
+        self._drain_pending_scheduler_preempts()
         # FlowPrefill: increment step_id before scheduling so this step
         # carries a fresh, monotonic ID. Passed into schedule() so the
         # scheduler attaches it atomically to both SchedulerOutput and
@@ -492,6 +506,38 @@ class EngineCore:
         # Monitor writes a new target if/when it decides to preempt again.
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
+
+    def _drain_pending_scheduler_preempts(self) -> None:
+        """Drain the SLO monitor's queued scheduler-level preempt requests.
+
+        Each entry is a req_id that should be removed from `running` and
+        have its KV freed — without aborting any forward pass. Called at
+        the top of step() before schedule().
+
+        If the named request isn't in running anymore (e.g. it finished
+        between when the monitor decided and now), silently skip it.
+        """
+        if self._pending_scheduler_preempts.empty():
+            return
+        timestamp = time.time()
+        preempted_count = 0
+        while True:
+            try:
+                req_id = self._pending_scheduler_preempts.get_nowait()
+            except queue.Empty:
+                break
+            running = self.scheduler.running
+            for i, request in enumerate(running):
+                if request.request_id == req_id:
+                    running.pop(i)
+                    self.scheduler._preempt_request(request, timestamp)
+                    preempted_count += 1
+                    break
+        if preempted_count > 0:
+            logger.info(
+                "FlowPrefill: drained %d scheduler-level preempt(s)",
+                preempted_count,
+            )
 
     def _handle_preemption(self, scheduler_output: SchedulerOutput) -> None:
         """Release the in-flight batch's running requests after a TP-wide
@@ -1056,7 +1102,9 @@ class EngineCoreProc(EngineCore):
                 from vllm.v1.core.sched.slo_monitor import SLOMonitor
 
                 self.slo_monitor = SLOMonitor(
-                    self.scheduler, self.preempt_target_step_id
+                    self.scheduler,
+                    self.preempt_target_step_id,
+                    pending_scheduler_preempts=self._pending_scheduler_preempts,
                 )
                 self.slo_monitor.start()
             else:
