@@ -9,6 +9,11 @@ source "$SCRIPT_DIR/config.sh"
 
 export CUDA_VISIBLE_DEVICES="$PREFILL_GPUS"
 export VLLM_HOST_IP="$NODE_IP"
+# FlowPrefill: opt this node in as the prefill node for the SLO monitor.
+# kv_role="kv_producer" here would already work, but we use the env var
+# uniformly across both Nixl and P2pNccl paths for consistency. Do NOT
+# set on decode start scripts.
+export FLOWPREFILL_ENABLED=1
 
 KV_CONFIG=$(cat <<EOF
 {"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2,"kv_buffer_size":"1e9","kv_port":"${PREFILL_KV_PORT}","kv_connector_extra_config":{"proxy_ip":"${NODE_IP}","proxy_port":"${PROXY_ZMQ_PORT}","http_ip":"${NODE_IP}","http_port":"${PREFILL_PORT}","send_type":"PUT_ASYNC"}}

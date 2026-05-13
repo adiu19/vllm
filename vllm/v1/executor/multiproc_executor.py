@@ -1024,10 +1024,26 @@ class WorkerProc:
 
                 output = func(*args, **kwargs)
             except Exception as e:
-                # Notes have been introduced in python 3.11
-                if hasattr(e, "add_note"):
-                    e.add_note(traceback.format_exc())
-                logger.exception("WorkerProc hit an exception.")
+                # FlowPrefill: PreemptionException is a control-flow signal,
+                # not a failure. Log at INFO level without a traceback to
+                # avoid misleading operators into thinking something broke.
+                # The exception itself still propagates to engine core via
+                # handle_output → PREEMPTED ResponseStatus.
+                from vllm.v1.core.sched.preempt_check import (
+                    PreemptionException,
+                )
+
+                if isinstance(e, PreemptionException):
+                    logger.info(
+                        "WorkerProc preempted: step_id=%d layer=%s",
+                        e.step_id,
+                        e.layer_name,
+                    )
+                else:
+                    # Notes have been introduced in python 3.11
+                    if hasattr(e, "add_note"):
+                        e.add_note(traceback.format_exc())
+                    logger.exception("WorkerProc hit an exception.")
                 # exception might not be serializable, so we convert it to
                 # string, only for logging purpose.
                 if output_rank is None or self.rank == output_rank:

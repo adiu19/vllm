@@ -11,6 +11,11 @@ export VLLM_HOST_IP="$NODE_IP"
 export VLLM_NIXL_SIDE_CHANNEL_HOST="$NODE_IP"
 export VLLM_NIXL_SIDE_CHANNEL_PORT="$PREFILL_NIXL_PORT"
 export UCX_NET_DEVICES=all
+# FlowPrefill: opt this node in as the prefill node for the SLO monitor.
+# NixlConnector uses kv_role="kv_both" on BOTH prefill and decode, so
+# kv_role alone can't tell them apart. This env var disambiguates.
+# Do NOT set on decode start scripts.
+export FLOWPREFILL_ENABLED=1
 
 KV_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_load_failure_policy":"fail"}'
 

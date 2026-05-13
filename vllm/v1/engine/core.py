@@ -383,6 +383,14 @@ class EngineCore:
         try:
             yield
         except Exception as err:
+            # FlowPrefill: PreemptionException is a control-flow signal, not
+            # a failure. Skip the dump_engine_exception (which logs at ERROR
+            # with full scheduler state); just re-raise so the outer caller
+            # can run its cleanup.
+            from vllm.v1.core.sched.preempt_check import PreemptionException
+
+            if isinstance(err, PreemptionException):
+                raise
             # We do not want to catch BaseException here since we're only
             # interested in dumping info when the exception is due to an
             # error from execute_model itself.
@@ -507,6 +515,13 @@ class EngineCore:
             if request.request_id in scheduled_req_ids:
                 running.pop(i)
                 self.scheduler._preempt_request(request, timestamp)
+        # Roll back the scheduler's "prev step scheduled" tracking. This step
+        # was scheduled but never completed — the work was thrown away. The
+        # next schedule() asserts that requests being resumed from waiting
+        # were NOT in prev_step_scheduled_req_ids; without this clear, the
+        # very requests we just preempted (now back in waiting, about to be
+        # re-admitted) would trip that assertion.
+        self.scheduler.prev_step_scheduled_req_ids -= scheduled_req_ids
 
     def post_step(self, model_executed: bool) -> None:
         # When using async scheduling we can't get draft token ids in advance,
@@ -1015,7 +1030,16 @@ class EngineCoreProc(EngineCore):
             sched_cfg = vllm_config.scheduler_config
             par_cfg = vllm_config.parallel_config
 
-            is_prefill_node = kv_cfg is not None and kv_cfg.is_kv_producer
+            # NOTE: kv_cfg.is_kv_producer is True for both "kv_producer" and
+            # "kv_both" roles. NixlConnector uses "kv_both" on BOTH prefill
+            # and decode nodes, so this flag alone cannot distinguish prefill
+            # from decode. Require an explicit opt-in env var that the user
+            # sets only on the prefill node's start script.
+            is_kv_producer = kv_cfg is not None and kv_cfg.is_kv_producer
+            flowprefill_opted_in = (
+                os.environ.get("FLOWPREFILL_ENABLED", "0") == "1"
+            )
+            is_prefill_node = is_kv_producer and flowprefill_opted_in
             chunked_prefill_on = sched_cfg.enable_chunked_prefill
             long_prefill_chunked = sched_cfg.long_prefill_token_threshold > 0
             pp_on = par_cfg.pipeline_parallel_size > 1
