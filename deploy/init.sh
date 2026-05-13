@@ -11,7 +11,8 @@
 #   1. Validates required env vars (HF_TOKEN, MODE)
 #   2. Git-syncs the fork to the branch matching MODE
 #   3. Sources deploy/config.sh from the freshly-pulled branch
-#   4. Verifies HuggingFace auth + (if MODEL is set) model access
+#   4. Verifies HuggingFace auth (token validity only — model-specific access
+#      is checked implicitly when vLLM downloads it)
 #   5. Checks GPU topology (NVLink presence) and memory state (no orphans)
 #   6. Prints a summary
 
@@ -80,19 +81,6 @@ if [ "$HTTP_CODE" != "200" ]; then
 fi
 USER=$(echo "$BODY" | python3 -c "import json,sys; print(json.load(sys.stdin).get('name','unknown'))")
 echo "       authenticated as $USER"
-
-if [ -n "${MODEL:-}" ]; then
-    MODEL_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-        -H "Authorization: Bearer ${HF_TOKEN}" \
-        "https://huggingface.co/api/models/${MODEL}")
-    if [ "$MODEL_CODE" != "200" ]; then
-        echo "ERROR: cannot access model '$MODEL' (HTTP $MODEL_CODE)" >&2
-        echo "License likely not accepted yet. Visit and click 'Agree and access':" >&2
-        echo "  https://huggingface.co/${MODEL}" >&2
-        exit 1
-    fi
-    echo "       model accessible: $MODEL"
-fi
 
 # ─────────────────────────────────────────────────────────────────────────
 # 5. GPU topology + health
