@@ -391,6 +391,7 @@ class MultiprocExecutor(Executor):
 
         def get_response():
             responses = []
+            preempted: tuple[int, str] | None = None
             for mq in response_mqs:
                 dequeue_timeout = (
                     None if deadline is None else (deadline - time.monotonic())
@@ -399,12 +400,31 @@ class MultiprocExecutor(Executor):
                     status, result = mq.dequeue(timeout=dequeue_timeout)
                 except TimeoutError as e:
                     raise TimeoutError(f"RPC call to {method} timed out.") from e
+                if status == WorkerProc.ResponseStatus.PREEMPTED:
+                    # FlowPrefill: worker raised PreemptionException.
+                    # When output_rank is None (e.g. execute_model with
+                    # kv_output_aggregator), ALL workers enqueue. We must
+                    # drain every queue before raising — otherwise stale
+                    # PREEMPTED entries contaminate the next step's read.
+                    # Save the first one's payload and keep draining.
+                    if preempted is None:
+                        preempted = result  # (step_id, layer_name)
+                    continue
                 if status != WorkerProc.ResponseStatus.SUCCESS:
                     raise RuntimeError(
                         f"Worker failed with error '{result}', please check the"
                         " stack trace above for the root cause"
                     )
                 responses.append(result)
+            if preempted is not None:
+                from vllm.v1.core.sched.preempt_check import (
+                    PreemptionException,
+                )
+
+                step_id, layer_name = preempted
+                raise PreemptionException(
+                    step_id=step_id, layer_name=layer_name
+                )
             return responses[0] if output_rank is not None else responses
 
         future = FutureWrapper(
@@ -926,16 +946,35 @@ class WorkerProc:
     class ResponseStatus(Enum):
         SUCCESS = auto()
         FAILURE = auto()
+        # FlowPrefill: preempt was decided mid-forward-pass and the worker
+        # raised PreemptionException. Distinct from FAILURE so engine core
+        # can rehydrate the exception type and metadata cleanly instead of
+        # treating it as a generic worker crash.
+        PREEMPTED = auto()
 
     def enqueue_output(self, output: Any):
         """Prepares output from the worker and enqueues it to the
         worker_response_mq. If the output is an Exception, it is
-        converted to a FAILURE response.
+        converted to a FAILURE (or PREEMPTED for PreemptionException)
+        response.
         """
         if isinstance(output, AsyncModelRunnerOutput):
             output = output.get_output()
 
-        if isinstance(output, Exception):
+        # FlowPrefill: PreemptionException needs to survive the round-trip
+        # to engine core with its step_id and layer_name intact. The
+        # generic Exception path string-flattens, which would lose the
+        # metadata and prevent engine core from running scoped cleanup.
+        # Import locally to avoid pulling preempt_check into module-import
+        # cycles.
+        from vllm.v1.core.sched.preempt_check import PreemptionException
+
+        if isinstance(output, PreemptionException):
+            result = (
+                WorkerProc.ResponseStatus.PREEMPTED,
+                (output.step_id, output.layer_name),
+            )
+        elif isinstance(output, Exception):
             result = (WorkerProc.ResponseStatus.FAILURE, str(output))
         else:
             result = (WorkerProc.ResponseStatus.SUCCESS, output)

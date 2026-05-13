@@ -946,7 +946,16 @@ class Scheduler(SchedulerInterface):
         agree. O(n log n) per call; negligible for typical waiting-queue
         sizes. See Race Conditions.md #11 (heap staleness is acceptable
         because we re-heapify each step).
+
+        Currently assumes self.waiting is a deque-like queue with clear()
+        and extend() (i.e. FCFSRequestQueue). Skips silently if those
+        methods aren't available — e.g. PriorityRequestQueue, which orders
+        by Request.priority not SLO priority. See Merge Plan: full queue
+        abstraction for SLO-aware ordering is post-merge work.
         """
+        if not (hasattr(self.waiting, "clear") and hasattr(self.waiting, "extend")):
+            return
+
         from vllm.v1.core.sched.slo_monitor import compute_request_priority
 
         # FCFSRequestQueue is a deque subclass; sort by building a list,

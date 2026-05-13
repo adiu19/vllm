@@ -455,13 +455,13 @@ class EngineCore:
                 if model_output is None:
                     model_output = self.model_executor.sample_tokens(grammar_output)
         except PreemptionException as e:
-            # The TP-wide preempt vote returned 1; one or more workers
-            # raised. Release the in-flight batch's running requests back
-            # to the waiting queue (this frees their KV cache blocks via
-            # the existing scheduler.preempt() machinery). The next step()
-            # call will run schedule() fresh — and with SLO-aware admission
-            # the high-priority waiting request gets admitted.
-            # See Race Conditions.md #16/#17.
+            # The TP-wide preempt vote returned 1; all workers raised in
+            # consensus. Release the in-flight batch's running requests
+            # back to the waiting queue (this frees their KV cache blocks
+            # via the existing scheduler._preempt_request machinery). The
+            # next step() call will run schedule() fresh — and with
+            # SLO-aware admission the high-priority waiting request gets
+            # admitted. See Race Conditions.md #16.
             logger.info(
                 "FlowPrefill: caught PreemptionException for step_id=%d "
                 "layer=%s — releasing in-flight requests",
