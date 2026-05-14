@@ -587,8 +587,18 @@ class OpenAIServingCompletion(OpenAIServing):
 
         request_metadata.final_usage_info = usage
         prompt_routed_experts = None
+        arrival_time_ms: int | None = None
         if final_res_batch:
             kv_transfer_params = final_res_batch[0].kv_transfer_params
+            # FlowPrefill: surface server-side arrival timestamp so
+            # benchmark load gens can anchor the SLO clock on the engine's
+            # view rather than client-side HTTP timing. Internally
+            # arrival_time is stored as float seconds (Request.__init__
+            # uses time.time()); we convert to int milliseconds at the
+            # response boundary for explicit units / JS-friendliness.
+            internal_arrival_s = final_res_batch[0].arrival_time
+            if internal_arrival_s is not None:
+                arrival_time_ms = int(internal_arrival_s * 1000)
             pre = final_res_batch[0].prompt_routed_experts
             if pre is not None:
                 prompt_routed_experts = pre.tolist()
@@ -602,6 +612,7 @@ class OpenAIServingCompletion(OpenAIServing):
             system_fingerprint=self.system_fingerprint,
             kv_transfer_params=kv_transfer_params,
             prompt_routed_experts=prompt_routed_experts,
+            arrival_time_ms=arrival_time_ms,
         )
 
     def _create_completion_logprobs(

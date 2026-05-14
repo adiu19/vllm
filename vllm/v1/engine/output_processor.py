@@ -175,6 +175,10 @@ class RequestState:
         self.is_prefilling = True
         self.queue = queue
         self.num_cached_tokens = 0
+        # FlowPrefill: keep arrival_time accessible regardless of log_stats
+        # so we can surface it on RequestOutput. log_stats may be False in
+        # some configs and we don't want to depend on self.stats being set.
+        self.arrival_time = arrival_time
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
 
@@ -205,6 +209,9 @@ class RequestState:
         self.prompt_len = len(self.prompt_token_ids)
         if self.stats is not None:
             self.stats.arrival_time = update.arrival_time
+        # FlowPrefill: keep our own arrival_time field aligned with
+        # streaming updates so RequestOutput surfaces the latest value.
+        self.arrival_time = update.arrival_time
         self.is_prefilling = True
 
     @classmethod
@@ -396,6 +403,7 @@ class RequestState:
             num_cached_tokens=self.num_cached_tokens,
             metrics=self.stats,
             prompt_routed_experts=prompt_routed_experts,
+            arrival_time=self.arrival_time,
         )
 
     def _new_completion_output(

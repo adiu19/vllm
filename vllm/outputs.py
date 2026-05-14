@@ -122,6 +122,11 @@ class RequestOutput:
         *,
         kv_transfer_params: dict[str, Any] | None = None,
         prompt_routed_experts: np.ndarray | None = None,
+        # Server-side wall-clock arrival timestamp (time.time()). Surfaced
+        # for FlowPrefill benchmarks so the load gen can anchor the SLO
+        # clock on the engine's view of arrival, not on client-side HTTP
+        # timing.
+        arrival_time: float | None = None,
         # Forward compatibility, code that uses args added in new release can
         # still run with older versions of vLLM without breaking.
         **kwargs: Any,
@@ -143,6 +148,7 @@ class RequestOutput:
         self.num_cached_tokens = num_cached_tokens
         self.kv_transfer_params = kv_transfer_params
         self.prompt_routed_experts = prompt_routed_experts
+        self.arrival_time = arrival_time
 
     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
         """Merge subsequent RequestOutput into this one"""

@@ -488,6 +488,17 @@ class CompletionResponse(OpenAIBaseModel):
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
     )
+    arrival_time_ms: int | None = Field(
+        default=None,
+        description=(
+            "Server-side wall-clock time when the engine stamped this "
+            "request, in milliseconds since the Unix epoch. FlowPrefill "
+            "benchmark uses this as the SLO clock start so that timing "
+            "isn't biased by HTTP RTT from the client side. Internal "
+            "RequestState.arrival_time stays as float seconds; this "
+            "field is converted at the response boundary."
+        ),
+    )
 
 
 class CompletionResponseStreamChoice(OpenAIBaseModel):
