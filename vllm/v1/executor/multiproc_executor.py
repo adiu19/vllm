@@ -627,9 +627,23 @@ class WorkerProc:
         # and compares to the worker's current step_id. None on non-prefill
         # nodes — module falls back to vote=0.
         if preempt_target_step_id is not None:
-            from vllm.v1.core.sched.preempt_check import set_preempt_target
+            from vllm.v1.core.sched.preempt_check import (
+                set_preempt_target,
+                set_total_num_layers,
+            )
 
             set_preempt_target(preempt_target_step_id)
+
+            # FlowPrefill Rule 2 stubbornness: register the model's
+            # transformer-layer count so preempt_check_at_attention can
+            # compute progress_frac = current_layer / total_layers and
+            # refuse preempts past the stubbornness threshold. Sourced
+            # from the HF config; constant for the worker's lifetime.
+            num_hidden_layers = getattr(
+                vllm_config.model_config.hf_config, "num_hidden_layers", 0
+            )
+            if num_hidden_layers > 0:
+                set_total_num_layers(num_hidden_layers)
         wrapper = WorkerWrapperBase(rpc_rank=local_rank, global_rank=rank)
         # TODO: move `init_worker` to executor level as a collective rpc call
         all_kwargs: list[dict] = [

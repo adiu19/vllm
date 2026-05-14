@@ -19,6 +19,7 @@ deadlock the cluster — surviving workers would block waiting forever for the
 non-participant. See Race Conditions.md #3.
 """
 
+import os
 from typing import Optional
 
 import torch
@@ -28,6 +29,16 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+
+# Adaptive stubbornness Rule 2: a request that has finished more than this
+# fraction of its forward pass refuses to be preempted. Default 0.9 → only
+# the last 10% of layers are "non-stubborn"; once we're past 90% the local
+# vote is forced to 0 even if the SLO monitor's preempt target matches our
+# step_id. Configurable via env var so we can sweep it in benchmarks.
+_STUBBORN_LAYER_FRAC = float(
+    os.environ.get("FLOWPREFILL_STUBBORN_LAYER_FRAC", "0.9")
+)
 
 
 class PreemptionException(Exception):
@@ -66,6 +77,21 @@ _preempt_target_step_id: Optional["object"] = None  # mp.Value('i'), loose-typed
 # SchedulerOutput.step_id via set_current_step_id(). -1 = no step in flight.
 _current_step_id: int = -1
 
+# Adaptive stubbornness Rule 2 state.
+#
+# _current_layer_idx: incremented on each preempt_check_at_attention call
+# (one call per transformer layer, in layer order); reset to 0 at the
+# start of each forward pass by set_current_step_id(). Worker-local, no
+# cross-process sharing — each worker tracks its own forward pass.
+#
+# _total_num_layers: set once during worker init from
+# vllm_config.model_config.hf_config.num_hidden_layers via
+# set_total_num_layers(). Deterministic — not inferred from observation.
+# 0 means "not registered" (e.g., non-prefill node, FlowPrefill disabled);
+# Rule 2 is skipped in that case.
+_current_layer_idx: int = 0
+_total_num_layers: int = 0
+
 
 def set_preempt_target(target) -> None:
     """Register the process-shared preempt target for this worker.
@@ -85,9 +111,34 @@ def set_current_step_id(step_id: int) -> None:
     `preempt_check_at_attention` reads this and compares to the shared
     preempt target. Step_ids are monotonic, set by engine core in
     SchedulerOutput.step_id (Race Conditions.md #2).
+
+    Also resets the Rule 2 layer counter — each forward pass starts at
+    layer 0 regardless of how the previous one terminated (completed,
+    preempted, errored).
     """
-    global _current_step_id
+    global _current_step_id, _current_layer_idx
     _current_step_id = step_id
+    _current_layer_idx = 0
+
+
+def set_total_num_layers(n: int) -> None:
+    """Register the model's transformer-layer count for Rule 2 stubbornness.
+
+    Called once during worker init alongside set_preempt_target, sourced
+    from vllm_config.model_config.hf_config.num_hidden_layers. Constant
+    across the worker's lifetime; deterministic — no inference needed.
+
+    If never called (e.g. non-prefill node, FlowPrefill disabled), the
+    module-level _total_num_layers stays 0 and Rule 2 is skipped.
+    """
+    global _total_num_layers
+    _total_num_layers = n
+    logger.info(
+        "preempt_check: total_num_layers=%d registered "
+        "(stubborn_layer_frac=%.2f)",
+        n,
+        _STUBBORN_LAYER_FRAC,
+    )
 
 
 def preempt_check_at_attention(layer_name: str) -> None:
@@ -100,7 +151,7 @@ def preempt_check_at_attention(layer_name: str) -> None:
     Ordering MUST be: compute local vote → all_reduce → raise.
     Raising before the all_reduce would deadlock peer ranks (Race Conditions.md #3).
     """
-    global _invocation_count
+    global _invocation_count, _current_layer_idx
 
     # Skip during CUDA stream capture: vLLM captures CUDA graphs at warmup
     # time (for uniform decode batches). Inside the capture context, any
@@ -118,6 +169,13 @@ def preempt_check_at_attention(layer_name: str) -> None:
     except AssertionError:
         return
 
+    # Advance the layer counter for this forward pass. Each transformer
+    # layer makes exactly one call to preempt_check_at_attention (in
+    # layer order), so the post-increment value IS our 1-indexed layer
+    # position. Reset to 0 at the start of each forward pass by
+    # set_current_step_id().
+    _current_layer_idx += 1
+
     # Compute the local vote first. Cheap user-space load on a shared
     # mmap'd byte for the target; comparison against worker-local int.
     target_step_id = (
@@ -127,6 +185,25 @@ def preempt_check_at_attention(layer_name: str) -> None:
     )
     matches = target_step_id >= 0 and target_step_id == _current_step_id
     local_value = 1 if matches else 0
+
+    # Adaptive stubbornness Rule 2: even if the SLO monitor wants to
+    # preempt us, refuse if we're past the layer-fraction threshold. A
+    # request 90%+ through prefill has done the expensive work; throwing
+    # it away to admit a fresher waiter wastes more compute than it
+    # saves. Worker-local check — all TP workers run the same layers in
+    # lockstep, so they see the same _current_layer_idx and reach the
+    # same vote independently. The collective MAX then composes to a
+    # unanimous 0 (no preempt).
+    #
+    # Skipped when _total_num_layers is 0 (setter never called → Rule 2
+    # disabled). In that case we fall through to the standard step_id
+    # match vote — Rule 1 (monitor-side) still applies regardless.
+    rule2_blocked = False
+    if matches and _total_num_layers > 0:
+        progress_frac = _current_layer_idx / _total_num_layers
+        if progress_frac > _STUBBORN_LAYER_FRAC:
+            local_value = 0
+            rule2_blocked = True
 
     if tp_group.world_size > 1:
         # All workers MUST reach this all_reduce. Do not raise above this
@@ -147,23 +224,47 @@ def preempt_check_at_attention(layer_name: str) -> None:
 
     # Per-call DEBUG log — fine-grained diagnosis only.
     logger.debug(
-        "preempt_check: rank=%d layer=%s vote=%d target=%d current=%d "
-        "invocation=%d",
+        "preempt_check: rank=%d layer=%s layer_idx=%d/%d vote=%d "
+        "target=%d current=%d invocation=%d rule2_blocked=%s",
         tp_group.rank_in_group,
         layer_name,
+        _current_layer_idx,
+        _total_num_layers,
         vote,
         target_step_id,
         _current_step_id,
         _invocation_count,
+        rule2_blocked,
     )
+
+    # Rule 2 firing is a debuggability event worth surfacing immediately
+    # (not throttled like the periodic summary). Only logs when the
+    # monitor's target matched our step and we refused — i.e. a preempt
+    # that would have fired without stubbornness. Each TP rank logs once
+    # per blocked layer; under load this is N_layers_remaining * N_ranks
+    # lines per blocked preempt, bounded and useful.
+    if rule2_blocked:
+        logger.info(
+            "Rule 2 stubborn: rank=%d step_id=%d layer_idx=%d/%d "
+            "(progress=%.2f > threshold=%.2f) — refusing preempt",
+            tp_group.rank_in_group,
+            _current_step_id,
+            _current_layer_idx,
+            _total_num_layers,
+            _current_layer_idx / _total_num_layers,
+            _STUBBORN_LAYER_FRAC,
+        )
 
     # Periodic INFO summary for validation runs.
     if _invocation_count % _LOG_EVERY_N == 0:
         logger.info(
-            "preempt_check fired: rank=%d layer=%s vote=%d target=%d "
-            "current=%d total_invocations=%d (logging every %d)",
+            "preempt_check fired: rank=%d layer=%s layer_idx=%d/%d "
+            "vote=%d target=%d current=%d total_invocations=%d "
+            "(logging every %d)",
             tp_group.rank_in_group,
             layer_name,
+            _current_layer_idx,
+            _total_num_layers,
             vote,
             target_step_id,
             _current_step_id,
