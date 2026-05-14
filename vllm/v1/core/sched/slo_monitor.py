@@ -96,6 +96,11 @@ class RequestEvaluation:
     time_until_deadline_ms: float
     slack_ms: float
     priority: float
+    # Adaptive stubbornness Rule 1: a request that's already been preempted
+    # once refuses to be preempted again. Read from Request.num_preemptions
+    # which the scheduler increments inside _preempt_request. Used by the
+    # monitor to filter ineligible victims before calling policy.decide.
+    num_preemptions: int = 0
 
 
 class TTFTPredictor:
@@ -217,11 +222,22 @@ class PreemptPolicy:
 class ConservativePolicy(PreemptPolicy):
     """Default. Preempt only if top_waiting beats best_running by margin.
 
-    Reasoning: if the BEST request currently running is more urgent than
-    the most urgent waiting, no preempt is justified. Only when even the
-    best running is less urgent does waiting truly deserve to displace it.
-    Once that condition holds, pick the worst-priority running as the
-    expendable victim.
+    Branches on slack signs first, then applies the margin only where it
+    is mathematically well-defined (both priorities positive). The
+    multiplicative margin inverts under negative priorities: for any
+    negative best_running, best_running * 1.2 sits BELOW best_running on
+    the number line, so a less-urgent waiter would still clear the gate.
+    See Unknowns.md "Infinite preempt loop" for the empirical evidence.
+
+    Four sign quadrants:
+      - top_waiting hopeless (slack < 0): never preempt for it. A hopeless
+        waiter shouldn't displace a running request — preempting wastes
+        the running request's prefill work for a request that will miss
+        its deadline anyway.
+      - running hopeless (slack < 0), waiter meetable: always preempt.
+        Even the best running won't meet its deadline; give the slot to
+        the waiter that can.
+      - both meetable: standard S-EDF margin check.
     """
 
     def decide(
@@ -232,6 +248,11 @@ class ConservativePolicy(PreemptPolicy):
     ) -> RequestEvaluation | None:
         top_waiting = max(waiting_evals, key=lambda e: e.priority)
         best_running = max(running_evals, key=lambda e: e.priority)
+
+        if top_waiting.slack_ms < 0:
+            return None
+        if best_running.slack_ms < 0:
+            return min(running_evals, key=lambda e: e.priority)
         if top_waiting.priority > best_running.priority * margin:
             return min(running_evals, key=lambda e: e.priority)
         return None
@@ -243,6 +264,11 @@ class AggressivePolicy(PreemptPolicy):
     More sensitive to SLO breaches, but causes more preempts and
     higher thrash risk under load. Kept as an injectable alternative
     for benchmark comparisons against the conservative default.
+
+    Sign-quadrant branching matches ConservativePolicy (see that
+    docstring for the rationale); the only difference is comparing
+    against bottom_running rather than best_running in the margin
+    branch.
     """
 
     def decide(
@@ -253,6 +279,11 @@ class AggressivePolicy(PreemptPolicy):
     ) -> RequestEvaluation | None:
         top_waiting = max(waiting_evals, key=lambda e: e.priority)
         bottom_running = min(running_evals, key=lambda e: e.priority)
+
+        if top_waiting.slack_ms < 0:
+            return None
+        if bottom_running.slack_ms < 0:
+            return bottom_running
         if top_waiting.priority > bottom_running.priority * margin:
             return bottom_running
         return None
@@ -357,26 +388,58 @@ class SLOMonitor:
 
         now_monotonic = time.monotonic()
 
-        # If either side is empty we can't reason about preemption — only
-        # emit a heartbeat with whatever queue stats we have.
-        if not waiting_evals or not running_evals:
-            self._maybe_heartbeat(now_monotonic, snap, waiting_evals, running_evals)
+        # Adaptive stubbornness Rule 1: a request that's already been
+        # preempted once refuses to give up its slot. Filter ineligible
+        # runners before the policy sees them so victim selection AND the
+        # "best running" reference both reflect only preempt-eligible
+        # candidates. If every running request is stubborn there's
+        # nothing the monitor can do — fall through to heartbeat.
+        eligible_running_evals = [
+            e for e in running_evals if e.num_preemptions == 0
+        ]
+        stubborn_count = len(running_evals) - len(eligible_running_evals)
+
+        # If either side is empty (no waiters, no runners, or no eligible
+        # runners after stubbornness filter), no preemption decision to
+        # make — emit a heartbeat with queue stats.
+        if not waiting_evals or not eligible_running_evals:
+            self._maybe_heartbeat(
+                now_monotonic,
+                snap,
+                waiting_evals,
+                running_evals,
+                stubborn_count,
+            )
             return
 
-        # Delegate the decision to the injected policy. Default
-        # (Conservative): preempt only if top_waiting beats best_running.
+        # Delegate the decision to the injected policy, passing only
+        # preempt-eligible runners. Default (Conservative): preempt only
+        # if top_waiting beats best_running.
         target = self._policy.decide(
-            waiting_evals, running_evals, self._preempt_margin
+            waiting_evals, eligible_running_evals, self._preempt_margin
         )
 
         if target is None:
             self._maybe_heartbeat(
-                now_monotonic, snap, waiting_evals, running_evals
+                now_monotonic,
+                snap,
+                waiting_evals,
+                running_evals,
+                stubborn_count,
             )
             return
 
         top_waiting = max(waiting_evals, key=lambda e: e.priority)
         target_in_batch = target.request_id in snap.current_batch_req_ids
+
+        # FlowPrefill: tell the scheduler which waiter this preempt is for,
+        # so the freed slot goes to top_waiting on next admission rather
+        # than whoever heapify ranks first (which can differ under
+        # priority ties, wall-clock drift, or fresh arrivals between
+        # snapshot and schedule()). STORE_ATTR is GIL-atomic; if this
+        # races with the scheduler's read+clear and the hint is lost, the
+        # monitor's next tick will re-fire and re-set it.
+        self._scheduler._preempt_hint_request_id = top_waiting.request_id
 
         if target_in_batch:
             # In-batch preempt: target is being processed RIGHT NOW.
@@ -401,7 +464,8 @@ class SLOMonitor:
             "(tokens=%d slack=%.1fms ttft_pred=%.1fms prio=%.4g) "
             "would displace running %s "
             "(tokens=%d slack=%.1fms ttft_pred=%.1fms prio=%.4g) "
-            "[in_batch=%s, margin=%.2fx, snapshot_age=%.1fms]",
+            "[in_batch=%s, margin=%.2fx, snapshot_age=%.1fms, "
+            "stubborn=%d/%d]",
             log_route,
             snap.step_id,
             top_waiting.request_id,
@@ -417,6 +481,8 @@ class SLOMonitor:
             target_in_batch,
             self._preempt_margin,
             (now_monotonic - snap.snapshot_time) * 1000.0,
+            stubborn_count,
+            len(running_evals),
         )
 
     def _evaluate(self, request: "Request") -> RequestEvaluation:
@@ -450,6 +516,7 @@ class SLOMonitor:
             time_until_deadline_ms=time_until_deadline_ms,
             slack_ms=slack_ms,
             priority=priority,
+            num_preemptions=getattr(request, "num_preemptions", 0),
         )
 
     def _maybe_heartbeat(
@@ -458,6 +525,7 @@ class SLOMonitor:
         snap: SchedulerSnapshot,
         waiting_evals: list[RequestEvaluation],
         running_evals: list[RequestEvaluation],
+        stubborn_count: int = 0,
     ) -> None:
         if (
             now_monotonic - self._last_heartbeat_monotonic
@@ -469,9 +537,11 @@ class SLOMonitor:
         all_evals = waiting_evals + running_evals
         slack_vals = [e.slack_ms for e in all_evals]
         logger.info(
-            "SLO monitor heartbeat: waiting=%d running=%d "
+            "SLO monitor heartbeat: waiting=%d running=%d stubborn=%d/%d "
             "slack_ms[min/max]=%s/%s snapshot_age=%.1fms",
             len(snap.waiting),
+            len(snap.running),
+            stubborn_count,
             len(snap.running),
             f"{min(slack_vals):.1f}" if slack_vals else "n/a",
             f"{max(slack_vals):.1f}" if slack_vals else "n/a",

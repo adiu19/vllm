@@ -266,6 +266,17 @@ class Scheduler(SchedulerInterface):
         self._snapshot_enabled: bool = False
         self._snapshot: SchedulerSnapshot | None = None
 
+        # FlowPrefill: preempt-target hint set by the SLO monitor when it
+        # fires PREEMPT INTENT. Carries the request_id of the waiter whose
+        # urgency justified the preempt, so the slot freed by the preempt
+        # is consumed by that specific request rather than whoever heapify
+        # ranks first after wall-clock drift / new arrivals. One-shot:
+        # _heapify_waiting_by_slo() reads then clears. Single-writer
+        # (monitor thread) / single-reader (main thread); STORE_ATTR and
+        # LOAD_ATTR are GIL-atomic so no lock needed. If a write races with
+        # the read+clear and gets lost, the monitor re-fires next tick.
+        self._preempt_hint_request_id: str | None = None
+
     def _mamba_block_aligned_split(
         self,
         request: Request,
@@ -968,6 +979,27 @@ class Scheduler(SchedulerInterface):
             key=compute_request_priority,
             reverse=True,
         )
+
+        # FlowPrefill: honor the preempt-target hint from the SLO monitor.
+        # If a preempt just fired for the sake of request H, ensure H sits
+        # at the front of waiting so admission consumes the freed slot for
+        # the specific request the monitor named — not whoever priority
+        # drift / new arrivals happened to rank first. Without this hint,
+        # the monitor and the scheduler can disagree on which request the
+        # preempt was "for" once priorities are close (see Unknowns.md
+        # "Infinite preempt loop" — coherence gap). One-shot consume.
+        hint_request_id = self._preempt_hint_request_id
+        self._preempt_hint_request_id = None
+        if hint_request_id is not None:
+            for i, req in enumerate(sorted_requests):
+                if req.request_id == hint_request_id:
+                    if i != 0:
+                        sorted_requests.insert(0, sorted_requests.pop(i))
+                    break
+            # If the hinted request isn't in waiting anymore (admitted
+            # elsewhere, completed, aborted), the hint silently no-ops
+            # and admission falls back to priority order.
+
         self.waiting.clear()
         self.waiting.extend(sorted_requests)
 
