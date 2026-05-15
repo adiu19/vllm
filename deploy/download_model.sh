@@ -25,16 +25,35 @@ source "$SCRIPT_DIR/config.sh"
 : "${HF_TOKEN:?HF_TOKEN must be set (sourced from config.sh or pod env)}"
 : "${MODEL:?MODEL must be set (sourced from config.sh)}"
 
-# Cache directory — use HF_HOME if set, else default to /workspace/hf_cache
-# to keep everything on the network volume.
-CACHE_DIR="${HF_HUB_CACHE:-${HF_HOME:-/workspace/hf_cache}}"
+# Cache layout:
+#   HF stores models at: $HF_HOME/hub/models--org--repo/...
+#   The `hub/` subdir is added automatically when HF_HOME is set.
+#
+# CRITICAL: do NOT pass `--cache-dir` to `hf download`. That flag is
+# equivalent to setting HF_HUB_CACHE — it disables the `hub/` subdir
+# convention and writes files directly under the given path. vLLM
+# expects the `hub/` convention, so a `--cache-dir` invocation creates
+# a duplicate model tree at the wrong path that vLLM can't find.
+#
+# Right approach: set HF_HOME, omit --cache-dir.
+export HF_HOME="${HF_HOME:-/workspace/hf_cache}"
+CACHE_DIR="$HF_HOME"
 mkdir -p "$CACHE_DIR"
+mkdir -p "$CACHE_DIR/hub"
 
 # Disable the xet downloader (flaky on MooseFS). Use traditional HTTP path.
 export HF_HUB_DISABLE_XET=1
 # Don't use hf-transfer either by default — its parallelism can overwhelm
 # slow network filesystems. Enable explicitly if your storage is fast.
 # export HF_HUB_ENABLE_HF_TRANSFER=1
+
+# HF cache env var hygiene: HF_HOME and HF_HUB_CACHE produce DIFFERENT
+# on-disk layouts ($HF_HOME/hub/... vs $HF_HUB_CACHE/... without hub/).
+# If both are set to the same path, HF creates duplicate model trees,
+# wasting GB. Unset HF_HUB_CACHE so HF_HOME's "with hub/" layout wins
+# and --cache-dir resolves the same way.
+unset HF_HUB_CACHE
+unset HF_HUB_CACHE_DIR
 
 # Model-specific cache directory (HF's per-model layout: "org/repo" → "models--org--repo")
 # NOTE: tr can't expand '/' to two characters; use sed for the double-dash.
@@ -55,11 +74,13 @@ echo "════════════════════════�
 echo
 echo "[1/4] Cleaning up stale processes and partial download state..."
 
-# Kill anything that might be holding file handles on the cache
+# Kill anything that might be holding file handles on the cache.
+# Cover both legacy `huggingface-cli download` and new `hf download`.
 pkill -9 -f vllm 2>/dev/null || true
 pkill -9 -f api_server 2>/dev/null || true
 pkill -9 -f WorkerProc 2>/dev/null || true
 pkill -9 -f huggingface-cli 2>/dev/null || true
+pkill -9 -f "hf download" 2>/dev/null || true
 pkill -9 -f hf-download 2>/dev/null || true
 sleep 2
 
@@ -96,23 +117,31 @@ echo "[3/4] Starting download with HF_HUB_DISABLE_XET=1, max-workers=2..."
 echo "  (Resumes from any successfully-cached files; only fetches what's missing.)"
 echo
 
-# --max-workers 2 keeps concurrent writes to MFS low, reducing hang probability.
-# hf resumes automatically — re-running this script after a failure
-# picks up where it left off.
+# --max-workers 2 keeps concurrent writes to MFS low, reducing hang
+# probability. hf resumes automatically — re-running this script after
+# a failure picks up where it left off.
 #
-# Use the new `hf` CLI; the legacy `huggingface-cli` is deprecated and no
-# longer works. Falls back to the legacy command if `hf` isn't installed.
+# NOTE on --cache-dir: deliberately omitted. With HF_HOME set above, HF
+# uses $HF_HOME/hub/ by default — which matches vLLM's expectations and
+# avoids creating a duplicate model tree at the no-`hub/` path.
+#
+# Use the new `hf` CLI; the legacy `huggingface-cli` is deprecated.
+# `--exclude` skips Meta's original PyTorch checkpoint duplicates
+# (consolidated.XX.pth) — those are the same weights as the safetensors
+# files we're already downloading, costing another ~140GB for nothing.
+EXCLUDE_PATTERNS=("--exclude" "original/*" "--exclude" "*.pth")
+
 if command -v hf >/dev/null 2>&1; then
     hf download "$MODEL" \
-        --cache-dir "$CACHE_DIR" \
         --max-workers 2 \
-        --token "$HF_TOKEN"
+        --token "$HF_TOKEN" \
+        "${EXCLUDE_PATTERNS[@]}"
 else
     echo "  Warning: 'hf' CLI not found, falling back to deprecated huggingface-cli"
     huggingface-cli download "$MODEL" \
-        --cache-dir "$CACHE_DIR" \
         --max-workers 2 \
-        --token "$HF_TOKEN"
+        --token "$HF_TOKEN" \
+        "${EXCLUDE_PATTERNS[@]}"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────
