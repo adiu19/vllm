@@ -179,11 +179,12 @@ def build_request_schedule(
 
     for t in arrivals:
         # Walk through prompts until we find one inside the [min, max]
-        # token window. Cap retries to avoid pathological loops on tiny corpora.
+        # token window. No per-request retry cap — walking the whole shuffled
+        # corpus is bounded by len(prompts). The only fatal case is the entire
+        # corpus exhausted without enough in-range matches.
         chosen = None
         chosen_len = None
-        retries = 0
-        while retries < 200 and prompt_cursor < len(shuffled_prompts):
+        while prompt_cursor < len(shuffled_prompts):
             candidate = shuffled_prompts[prompt_cursor]
             prompt_cursor += 1
             ids = tokenizer(candidate, add_special_tokens=False).input_ids
@@ -192,12 +193,13 @@ def build_request_schedule(
                 chosen = candidate
                 chosen_len = n_tok
                 break
-            retries += 1
             skipped_oor += 1
         if chosen is None:
             raise RuntimeError(
-                "Ran out of in-range prompts; corpus too small or "
-                "prompt window too tight."
+                f"Corpus exhausted before scheduling all {len(arrivals)} "
+                f"requests (skipped {skipped_oor} out-of-range prompts in "
+                f"window [{min_prompt_tokens}, {max_prompt_tokens}]). "
+                f"Widen the window or use a larger corpus."
             )
 
         # SLO sized off the continuous predictor — no bucket snapping.
