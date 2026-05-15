@@ -173,10 +173,18 @@ def get_next_client(app, service_type: str):
 
 
 async def send_request_to_service(
-    client_info: dict, endpoint: str, req_data: dict, request_id: str
+    client_info: dict,
+    endpoint: str,
+    req_data: dict,
+    request_id: str,
+    flowprefill_slo_ms: str | None = None,
 ):
     """
     Send a request to a service using a client from the pool.
+
+    FlowPrefill: when `flowprefill_slo_ms` is non-None, forward it as the
+    X-FlowPrefill-SLO-MS header so the prefill backend's SLO monitor can
+    size slack per-request instead of falling back to FLOWPREFILL_SLO_BASE_MS.
     """
     req_data = req_data.copy()
     req_data["kv_transfer_params"] = {
@@ -200,6 +208,8 @@ async def send_request_to_service(
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
         "X-Request-Id": request_id,
     }
+    if flowprefill_slo_ms is not None:
+        headers["X-FlowPrefill-SLO-MS"] = flowprefill_slo_ms
 
     response = await client_info["client"].post(
         endpoint, json=req_data, headers=headers
@@ -218,15 +228,26 @@ async def send_request_to_service(
 
 
 async def stream_service_response(
-    client_info: dict, endpoint: str, req_data: dict, request_id: str
+    client_info: dict,
+    endpoint: str,
+    req_data: dict,
+    request_id: str,
+    flowprefill_slo_ms: str | None = None,
 ):
     """
     Asynchronously stream response from a service using a client from the pool.
+
+    FlowPrefill: forward X-FlowPrefill-SLO-MS to the decode backend too.
+    The monitor only runs on prefill, so this is harmless on the decode
+    side — but keeping headers consistent across both backends avoids
+    surprises if the decode-side picks up a role later.
     """
     headers = {
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
         "X-Request-Id": request_id,
     }
+    if flowprefill_slo_ms is not None:
+        headers["X-FlowPrefill-SLO-MS"] = flowprefill_slo_ms
 
     async with client_info["client"].stream(
         "POST", endpoint, json=req_data, headers=headers
@@ -241,12 +262,18 @@ async def _handle_completions(api: str, request: Request):
         req_data = await request.json()
         request_id = str(uuid.uuid4())
 
+        # FlowPrefill: capture the client's per-request SLO so we can
+        # forward it to the prefill backend (where the SLO monitor reads
+        # it). Header name is case-insensitive in Starlette's MultiDict.
+        flowprefill_slo_ms = request.headers.get("x-flowprefill-slo-ms")
+
         # Get the next prefill client in round-robin fashion
         prefill_client_info = get_next_client(request.app, "prefill")
 
         # Send request to prefill service
         response = await send_request_to_service(
-            prefill_client_info, api, req_data, request_id
+            prefill_client_info, api, req_data, request_id,
+            flowprefill_slo_ms=flowprefill_slo_ms,
         )
 
         # Extract the needed fields
@@ -286,7 +313,8 @@ async def _handle_completions(api: str, request: Request):
         # Stream response from decode service
         async def generate_stream():
             async for chunk in stream_service_response(
-                decode_client_info, api, req_data, request_id=request_id
+                decode_client_info, api, req_data, request_id=request_id,
+                flowprefill_slo_ms=flowprefill_slo_ms,
             ):
                 yield chunk
 
