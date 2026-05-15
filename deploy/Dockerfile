@@ -42,10 +42,13 @@ RUN pip3 install \
     py-spy \
     "nixl[cu13]>=0.7.1,<=0.10.1"
 
-# Clone the fork. init.sh pulls the FlowPrefill working branch on every
-# container start (single-branch model — policy is a runtime knob in
-# deploy/config.json, not a branch).
-RUN git clone https://github.com/adiu19/vllm /opt/vllm-fork && \
+# Clone the fork onto the FlowPrefill working branch. init.sh git-pulls
+# on every container start to pick up code changes — but the BAKED-IN
+# checkout must already be on dev-treatment, otherwise the on-disk
+# init.sh is the old one and dies before it can pull (entrypoint set -e
+# then crashes the container). Single-branch model — policy is a runtime
+# knob in deploy/config.json, not a branch.
+RUN git clone -b dev-treatment https://github.com/adiu19/vllm /opt/vllm-fork && \
     sed -i 's/^license = "Apache-2.0"/license = {text = "Apache-2.0"}/' /opt/vllm-fork/pyproject.toml && \
     sed -i '/^license-files/d' /opt/vllm-fork/pyproject.toml
 
