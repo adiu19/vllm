@@ -375,7 +375,35 @@ def git_short_sha() -> str:
         return "unknown"
 
 
-def write_outputs(args, rows: list[dict], schedule: list[dict]) -> None:
+def _resolved_env_snapshot(deploy_cfg: dict) -> dict[str, str]:
+    """Record what the SERVER was actually configured with. Prefer the
+    values resolved by deploy.config.load() (the same SoT the server
+    uses); fall back to os.environ for keys not in the bucket.
+
+    Why not just read os.environ: loadgen.main() doesn't mutate the
+    process env after load() — env_snapshot would say "<unset>" even
+    though the server sees MODE / FLOWPREFILL_POLICY correctly.
+    """
+    keys = [
+        "MODE", "FLOWPREFILL_ENABLED", "FLOWPREFILL_POLICY",
+        "FLOWPREFILL_STUBBORN_LAYER_FRAC", "FLOWPREFILL_SLO_BASE_MS",
+        "HF_HOME",
+    ]
+    bucket_env = deploy_cfg.get("env", {})
+    snapshot: dict[str, str] = {}
+    for k in keys:
+        if k == "MODE":
+            snapshot[k] = deploy_cfg.get("mode", os.environ.get(k, "<unset>"))
+        elif k in bucket_env:
+            snapshot[k] = str(bucket_env[k])
+        else:
+            snapshot[k] = os.environ.get(k, "<unset>")
+    return snapshot
+
+
+def write_outputs(
+    args, rows: list[dict], schedule: list[dict], deploy_cfg: dict
+) -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -412,14 +440,7 @@ def write_outputs(args, rows: list[dict], schedule: list[dict]) -> None:
         "git_sha": git_short_sha(),
         "started_at_ms": min((r["t_client_send_ms"] for r in rows), default=0),
         "ended_at_ms": max((r["t_decode_last_byte_ms"] for r in rows), default=0),
-        "env_snapshot": {
-            k: os.environ.get(k, "<unset>")
-            for k in [
-                "MODE", "FLOWPREFILL_ENABLED", "FLOWPREFILL_POLICY",
-                "FLOWPREFILL_STUBBORN_LAYER_FRAC", "FLOWPREFILL_SLO_BASE_MS",
-                "HF_HOME",
-            ]
-        },
+        "env_snapshot": _resolved_env_snapshot(deploy_cfg),
     }
     with meta_path.open("w") as f:
         json.dump(meta, f, indent=2)
@@ -514,7 +535,7 @@ def main() -> int:
     rows = asyncio.run(drive(args, schedule))
 
     # 4. Write outputs.
-    write_outputs(args, rows, schedule)
+    write_outputs(args, rows, schedule, deploy_cfg)
     return 0
 
 
