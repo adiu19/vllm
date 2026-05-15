@@ -224,6 +224,9 @@ hip_compat.h
 
 # Benchmark dataset
 benchmarks/**/*.json
+# FlowPrefill calibration data — keep tracked (baselines + predictor coefficients
+# per model/hardware combo, regenerable via benchmarks/flowprefill/profile_ttft.py).
+!benchmarks/flowprefill/results/**/*.json
 
 # Linting
 actionlint
