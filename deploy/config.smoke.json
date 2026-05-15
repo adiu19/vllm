@@ -4,8 +4,8 @@
   "control": {
     "model": {
       "name": "meta-llama/Llama-3.1-8B-Instruct",
-      "max_model_len": 8500,
-      "max_num_batched_tokens": 9000,
+      "max_model_len": 2000,
+      "max_num_batched_tokens": 2500,
       "enable_chunked_prefill": false,
       "async_scheduling": false,
       "enable_prefix_caching": false
@@ -47,8 +47,8 @@
   "conservative": {
     "model": {
       "name": "meta-llama/Llama-3.1-8B-Instruct",
-      "max_model_len": 8500,
-      "max_num_batched_tokens": 9000,
+      "max_model_len": 2000,
+      "max_num_batched_tokens": 2500,
       "enable_chunked_prefill": false,
       "async_scheduling": false,
       "enable_prefix_caching": false
@@ -91,8 +91,8 @@
   "aggressive": {
     "model": {
       "name": "meta-llama/Llama-3.1-8B-Instruct",
-      "max_model_len": 8500,
-      "max_num_batched_tokens": 9000,
+      "max_model_len": 2000,
+      "max_num_batched_tokens": 2500,
       "enable_chunked_prefill": false,
       "async_scheduling": false,
       "enable_prefix_caching": false
