@@ -31,6 +31,13 @@ RUN apt-get update && apt-get install -y \
     jq \
     && rm -rf /var/lib/apt/lists/*
 
+# Purge the Ubuntu apt-installed `python3-blinker` (distutils-managed,
+# pip refuses to uninstall it) so the next pip install can pull a newer
+# blinker that `quart` requires. Do NOT autoremove — it cascades and
+# yanks python3 itself.
+RUN apt-get update && apt-get purge -y python3-blinker && \
+    rm -rf /var/lib/apt/lists/*
+
 # Python tooling:
 #   msgpack, quart, pyzmq            → P/D proxy + P2pNcclConnector deps
 #   nixl[cu13]                       → NixlConnector KV transfer
