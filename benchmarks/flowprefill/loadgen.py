@@ -147,6 +147,8 @@ def build_request_schedule(
     tier_split: float,
     prompts_pool: list[str],
     tokenizer,
+    min_prompt_tokens: int = MIN_PROMPT_TOKENS,
+    max_prompt_tokens: int = MAX_PROMPT_TOKENS,
 ) -> list[dict]:
     """Pre-generate the full request schedule deterministically.
 
@@ -186,7 +188,7 @@ def build_request_schedule(
             prompt_cursor += 1
             ids = tokenizer(candidate, add_special_tokens=False).input_ids
             n_tok = len(ids)
-            if MIN_PROMPT_TOKENS <= n_tok <= MAX_PROMPT_TOKENS:
+            if min_prompt_tokens <= n_tok <= max_prompt_tokens:
                 chosen = candidate
                 chosen_len = n_tok
                 break
@@ -454,6 +456,13 @@ def main() -> int:
     ap.add_argument("--master-seed", type=int, default=42)
     ap.add_argument("--output-dir", required=True)
     ap.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
+    ap.add_argument("--min-prompt-tokens", type=int, default=MIN_PROMPT_TOKENS,
+                    help="Lower bound on prompt length (tokens). Bump up to "
+                         "force prefill contention on fast models — pairs of "
+                         "prompts whose sum exceeds max_num_batched_tokens "
+                         "can't co-batch.")
+    ap.add_argument("--max-prompt-tokens", type=int, default=MAX_PROMPT_TOKENS,
+                    help="Upper bound on prompt length (tokens).")
     args = ap.parse_args()
 
     if not args.model:
@@ -490,6 +499,8 @@ def main() -> int:
         tier_split=args.tier_split,
         prompts_pool=prompts_pool,
         tokenizer=tokenizer,
+        min_prompt_tokens=args.min_prompt_tokens,
+        max_prompt_tokens=args.max_prompt_tokens,
     )
 
     # 3. Run.
