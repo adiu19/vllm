@@ -25,13 +25,12 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-# TTFT prediction coefficients.
-# Linear model: predicted_TTFT_ms = a * num_prompt_tokens + c
-# Anchor: Cursor blog, Llama 2 70B FP16, 2x A100 TP=2, 512 tokens -> 217ms.
-# Scaling TP=2 -> TP=4 halves the slope; overhead is roughly constant.
-# TODO: replace with coefficients fitted from a profiling sweep on our setup.
-TTFT_COEFF_A_MS_PER_TOKEN = 0.21
-TTFT_COEFF_C_MS = 20.0
+# TTFT prediction coefficients. Linear model: predicted_TTFT_ms = a * tokens + c.
+# Refit from benchmarks/flowprefill/profile_ttft.py on Llama 3.3 70B / A100 TP=4
+# (single-flight, uncontended, 6 buckets 256-8000 tokens, R²=0.9996).
+# Re-run the profiler on any new (model, hardware, TP) combination.
+TTFT_COEFF_A_MS_PER_TOKEN = 0.173046
+TTFT_COEFF_C_MS = 34.133
 
 # SLO target.
 # Overridable via env var FLOWPREFILL_SLO_BASE_MS for validation runs — lets

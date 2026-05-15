@@ -1,0 +1,35 @@
+{
+  "model": "meta-llama/Llama-3.3-70B-Instruct",
+  "tp": 4,
+  "endpoint": "http://localhost:10001",
+  "measured_at": "2026-05-15T08:35:34.159992+00:00",
+  "a_ms_per_token": 0.173046,
+  "c_ms": 34.133,
+  "r_squared": 0.9996,
+  "fit_points": [
+    {
+      "length": 242,
+      "ttft_ms": 78.5
+    },
+    {
+      "length": 498,
+      "ttft_ms": 130.0
+    },
+    {
+      "length": 1010,
+      "ttft_ms": 213.0
+    },
+    {
+      "length": 1986,
+      "ttft_ms": 367.0
+    },
+    {
+      "length": 3986,
+      "ttft_ms": 710.0
+    },
+    {
+      "length": 7986,
+      "ttft_ms": 1424.5
+    }
+  ]
+}
