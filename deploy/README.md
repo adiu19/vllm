@@ -29,12 +29,10 @@ bash /opt/vllm-fork/deploy/start_standalone.sh
 | `init.sh` | Pre-flight: validates env, git-syncs, HF auth + model access, GPU checks. Lives in git, pulled fresh on every container start. |
 | `config.sh` | Branch-specific config: model, ports, GPUs, NCCL env, `EXTRA_VLLM_FLAGS`. Sourced by `init.sh` and every `start_*.sh`. |
 | `experiments.sh` | `MODE → BRANCH` mapping. Single file controls which branch each mode checks out. |
-| `start_prefill_nixl.sh` | Launch prefill with NixlConnector (kv_both). |
-| `start_decode_nixl.sh` | Launch decode with NixlConnector (kv_both). |
-| `start_prefill.sh` | Launch prefill with P2pNcclConnector (kv_producer). |
-| `start_decode.sh` | Launch decode with P2pNcclConnector (kv_consumer). |
+| `start_prefill_nixl.sh` | Launch prefill with NixlConnector (kv_both). FlowPrefill prefill node. |
+| `start_decode_nixl.sh` | Launch decode with NixlConnector (kv_both). FlowPrefill decode node. |
+| `start_proxy_nixl.sh` | Launches `benchmarks/flowprefill/proxy.py` — request router with timing headers for benchmarks. |
 | `start_standalone.sh` | Single-instance vLLM, no P/D, no KV connector. Useful for code sanity tests. |
-| `start_proxy.sh`, `start_proxy_nixl.sh`, `proxy.py` | P/D request router (P2pNccl path uses these). |
 | `kill_gpu.sh` | Kill all vLLM/proxy processes and wait for GPU memory to clear. |
 | `verify_hf_auth.sh` | Standalone HF auth + model-access check (also called by `init.sh`). |
 | `check_network.sh` | RunPod-specific network checks. |

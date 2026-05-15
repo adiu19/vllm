@@ -24,8 +24,8 @@ nohup python3 -m vllm.entrypoints.openai.api_server \
     --model "$MODEL" \
     --host 0.0.0.0 \
     --port "$PREFILL_PORT" \
-    --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" \
-    --gpu-memory-utilization 0.8 \
+    --tensor-parallel-size "$PREFILL_TP" \
+    --gpu-memory-utilization "$PREFILL_GPU_MEM_UTIL" \
     $EXTRA_VLLM_FLAGS \
     --kv-transfer-config "$KV_CONFIG" > "$PREFILL_LOG" 2>&1 &
 echo $! > /tmp/prefill.pid

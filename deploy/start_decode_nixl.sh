@@ -19,8 +19,8 @@ nohup python3 -m vllm.entrypoints.openai.api_server \
     --model "$MODEL" \
     --host 0.0.0.0 \
     --port "$DECODE_PORT" \
-    --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" \
-    --gpu-memory-utilization 0.8 \
+    --tensor-parallel-size "$DECODE_TP" \
+    --gpu-memory-utilization "$DECODE_GPU_MEM_UTIL" \
     $EXTRA_VLLM_FLAGS \
     --kv-transfer-config "$KV_CONFIG" > "$DECODE_LOG" 2>&1 &
 echo $! > /tmp/decode.pid
