@@ -67,6 +67,38 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────
+# 3b. Last-resort: any Python process with CUDA libraries mmap'd in.
+#
+# Some processes have CUDA contexts open (and are holding GPU memory)
+# but their /dev/nvidia* file handles have already been closed — fuser
+# returns empty even though `nvidia-smi` still shows allocated memory.
+# Catches this by scanning /proc/<pid>/maps for libcuda/libnvidia,
+# which proves the process has CUDA runtime loaded and is the most
+# likely owner of any orphaned GPU memory.
+# ─────────────────────────────────────────────────────────────────────────
+echo "Checking for Python processes with CUDA libraries loaded..."
+CUDA_PYTHON_PIDS=$(
+    pgrep -f python 2>/dev/null | while read -r pid; do
+        if grep -qE 'libcuda|libnvidia' "/proc/$pid/maps" 2>/dev/null; then
+            echo "$pid"
+        fi
+    done
+)
+if [ -n "${CUDA_PYTHON_PIDS:-}" ]; then
+    echo "  Python PIDs with CUDA loaded: $(echo "$CUDA_PYTHON_PIDS" | tr '\n' ' ')"
+    for pid in $CUDA_PYTHON_PIDS; do
+        if [ "$pid" = "1" ] || [ "$pid" = "$$" ]; then continue; fi
+        if [ -r "/proc/$pid/comm" ]; then
+            cmd=$(cat "/proc/$pid/comm" 2>/dev/null || echo '?')
+            echo "  Killing PID $pid ($cmd)"
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+    done
+else
+    echo "  None."
+fi
+
+# ─────────────────────────────────────────────────────────────────────────
 # 4. Release ports (KV-transfer, HTTP, NIXL side-channels, etc.)
 # ─────────────────────────────────────────────────────────────────────────
 for port in 14579 14580 14581 14590 14591 8100 8200 8300 10001 30001 5600 5601; do

@@ -36,8 +36,9 @@ export HF_HUB_DISABLE_XET=1
 # slow network filesystems. Enable explicitly if your storage is fast.
 # export HF_HUB_ENABLE_HF_TRANSFER=1
 
-# Model-specific cache directory (HF's per-model layout)
-MODEL_DIR_NAME="models--$(echo "$MODEL" | tr '/' '--')"
+# Model-specific cache directory (HF's per-model layout: "org/repo" → "models--org--repo")
+# NOTE: tr can't expand '/' to two characters; use sed for the double-dash.
+MODEL_DIR_NAME="models--$(echo "$MODEL" | sed 's:/:--:g')"
 MODEL_CACHE_PATH="$CACHE_DIR/hub/$MODEL_DIR_NAME"
 
 echo "═════════════════════════════════════════════════════════════════"
@@ -96,12 +97,23 @@ echo "  (Resumes from any successfully-cached files; only fetches what's missing
 echo
 
 # --max-workers 2 keeps concurrent writes to MFS low, reducing hang probability.
-# huggingface-cli resumes automatically — re-running this script after a failure
+# hf resumes automatically — re-running this script after a failure
 # picks up where it left off.
-huggingface-cli download "$MODEL" \
-    --cache-dir "$CACHE_DIR" \
-    --max-workers 2 \
-    --token "$HF_TOKEN"
+#
+# Use the new `hf` CLI; the legacy `huggingface-cli` is deprecated and no
+# longer works. Falls back to the legacy command if `hf` isn't installed.
+if command -v hf >/dev/null 2>&1; then
+    hf download "$MODEL" \
+        --cache-dir "$CACHE_DIR" \
+        --max-workers 2 \
+        --token "$HF_TOKEN"
+else
+    echo "  Warning: 'hf' CLI not found, falling back to deprecated huggingface-cli"
+    huggingface-cli download "$MODEL" \
+        --cache-dir "$CACHE_DIR" \
+        --max-workers 2 \
+        --token "$HF_TOKEN"
+fi
 
 # ─────────────────────────────────────────────────────────────────────────
 # Post-verification
