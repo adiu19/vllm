@@ -11,8 +11,7 @@
 # proxy serialization), the fix lives in our fork.
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=/dev/null
-source "$SCRIPT_DIR/config.sh"
+eval "$(python3 "$SCRIPT_DIR/config.py")" || { echo "config.py failed" >&2; exit 1; }
 
 nohup python3 -u benchmarks/flowprefill/proxy.py \
     --port "$PROXY_HTTP_PORT" \

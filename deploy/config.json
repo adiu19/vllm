@@ -1,0 +1,134 @@
+{
+  "_comment": "FlowPrefill deploy config. Top-level keys are policy buckets. Each bucket is self-contained (model, topology, env). config.sh picks one based on $MODE (default conservative). Edit values in place; do not introduce per-bucket inheritance.",
+
+  "control": {
+    "model": {
+      "name": "meta-llama/Llama-3.3-70B-Instruct",
+      "max_model_len": 8500,
+      "max_num_batched_tokens": 9000,
+      "enable_chunked_prefill": false,
+      "async_scheduling": false,
+      "enable_prefix_caching": false
+    },
+    "topology": {
+      "prefill_tp": 4,
+      "decode_tp": 4,
+      "prefill_gpus": "0,1,2,3",
+      "decode_gpus": "4,5,6,7",
+      "standalone_gpus": "0,1,2,3",
+      "prefill_gpu_mem_util": 0.85,
+      "decode_gpu_mem_util": 0.85
+    },
+    "ports": {
+      "prefill": 8100,
+      "decode": 8200,
+      "standalone": 8300,
+      "proxy_http": 10001,
+      "proxy_zmq": 30001,
+      "prefill_kv": 14579,
+      "decode_kv": 14590,
+      "prefill_nixl": 5600,
+      "decode_nixl": 5601
+    },
+    "logs": {
+      "prefill": "/tmp/prefill.log",
+      "decode": "/tmp/decode.log",
+      "proxy": "/tmp/proxy.log",
+      "standalone": "/tmp/standalone.log"
+    },
+    "env": {
+      "NODE_IP": "127.0.0.1",
+      "NCCL_IB_DISABLE": "1",
+      "NCCL_DEBUG": "INFO",
+      "VLLM_LOGGING_LEVEL": "INFO"
+    }
+  },
+
+  "conservative": {
+    "model": {
+      "name": "meta-llama/Llama-3.3-70B-Instruct",
+      "max_model_len": 8500,
+      "max_num_batched_tokens": 9000,
+      "enable_chunked_prefill": false,
+      "async_scheduling": false,
+      "enable_prefix_caching": false
+    },
+    "topology": {
+      "prefill_tp": 4,
+      "decode_tp": 4,
+      "prefill_gpus": "0,1,2,3",
+      "decode_gpus": "4,5,6,7",
+      "standalone_gpus": "0,1,2,3",
+      "prefill_gpu_mem_util": 0.85,
+      "decode_gpu_mem_util": 0.85
+    },
+    "ports": {
+      "prefill": 8100,
+      "decode": 8200,
+      "standalone": 8300,
+      "proxy_http": 10001,
+      "proxy_zmq": 30001,
+      "prefill_kv": 14579,
+      "decode_kv": 14590,
+      "prefill_nixl": 5600,
+      "decode_nixl": 5601
+    },
+    "logs": {
+      "prefill": "/tmp/prefill.log",
+      "decode": "/tmp/decode.log",
+      "proxy": "/tmp/proxy.log",
+      "standalone": "/tmp/standalone.log"
+    },
+    "env": {
+      "NODE_IP": "127.0.0.1",
+      "NCCL_IB_DISABLE": "1",
+      "NCCL_DEBUG": "INFO",
+      "VLLM_LOGGING_LEVEL": "INFO",
+      "FLOWPREFILL_POLICY": "conservative"
+    }
+  },
+
+  "aggressive": {
+    "model": {
+      "name": "meta-llama/Llama-3.3-70B-Instruct",
+      "max_model_len": 8500,
+      "max_num_batched_tokens": 9000,
+      "enable_chunked_prefill": false,
+      "async_scheduling": false,
+      "enable_prefix_caching": false
+    },
+    "topology": {
+      "prefill_tp": 4,
+      "decode_tp": 4,
+      "prefill_gpus": "0,1,2,3",
+      "decode_gpus": "4,5,6,7",
+      "standalone_gpus": "0,1,2,3",
+      "prefill_gpu_mem_util": 0.85,
+      "decode_gpu_mem_util": 0.85
+    },
+    "ports": {
+      "prefill": 8100,
+      "decode": 8200,
+      "standalone": 8300,
+      "proxy_http": 10001,
+      "proxy_zmq": 30001,
+      "prefill_kv": 14579,
+      "decode_kv": 14590,
+      "prefill_nixl": 5600,
+      "decode_nixl": 5601
+    },
+    "logs": {
+      "prefill": "/tmp/prefill.log",
+      "decode": "/tmp/decode.log",
+      "proxy": "/tmp/proxy.log",
+      "standalone": "/tmp/standalone.log"
+    },
+    "env": {
+      "NODE_IP": "127.0.0.1",
+      "NCCL_IB_DISABLE": "1",
+      "NCCL_DEBUG": "INFO",
+      "VLLM_LOGGING_LEVEL": "INFO",
+      "FLOWPREFILL_POLICY": "aggressive"
+    }
+  }
+}

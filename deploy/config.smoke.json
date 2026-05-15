@@ -1,0 +1,134 @@
+{
+  "_comment": "Smoke-test config — small pod, 8B model, TP=1 prefill + TP=1 decode, 2 GPUs total. Layout mirrors config.json exactly; only model.name + topology differ. Selected by config.sh when SMOKE=true.",
+
+  "control": {
+    "model": {
+      "name": "meta-llama/Llama-3.1-8B-Instruct",
+      "max_model_len": 8500,
+      "max_num_batched_tokens": 9000,
+      "enable_chunked_prefill": false,
+      "async_scheduling": false,
+      "enable_prefix_caching": false
+    },
+    "topology": {
+      "prefill_tp": 1,
+      "decode_tp": 1,
+      "prefill_gpus": "0",
+      "decode_gpus": "1",
+      "standalone_gpus": "0",
+      "prefill_gpu_mem_util": 0.85,
+      "decode_gpu_mem_util": 0.85
+    },
+    "ports": {
+      "prefill": 8100,
+      "decode": 8200,
+      "standalone": 8300,
+      "proxy_http": 10001,
+      "proxy_zmq": 30001,
+      "prefill_kv": 14579,
+      "decode_kv": 14590,
+      "prefill_nixl": 5600,
+      "decode_nixl": 5601
+    },
+    "logs": {
+      "prefill": "/tmp/prefill.log",
+      "decode": "/tmp/decode.log",
+      "proxy": "/tmp/proxy.log",
+      "standalone": "/tmp/standalone.log"
+    },
+    "env": {
+      "NODE_IP": "127.0.0.1",
+      "NCCL_IB_DISABLE": "1",
+      "NCCL_DEBUG": "INFO",
+      "VLLM_LOGGING_LEVEL": "INFO"
+    }
+  },
+
+  "conservative": {
+    "model": {
+      "name": "meta-llama/Llama-3.1-8B-Instruct",
+      "max_model_len": 8500,
+      "max_num_batched_tokens": 9000,
+      "enable_chunked_prefill": false,
+      "async_scheduling": false,
+      "enable_prefix_caching": false
+    },
+    "topology": {
+      "prefill_tp": 1,
+      "decode_tp": 1,
+      "prefill_gpus": "0",
+      "decode_gpus": "1",
+      "standalone_gpus": "0",
+      "prefill_gpu_mem_util": 0.85,
+      "decode_gpu_mem_util": 0.85
+    },
+    "ports": {
+      "prefill": 8100,
+      "decode": 8200,
+      "standalone": 8300,
+      "proxy_http": 10001,
+      "proxy_zmq": 30001,
+      "prefill_kv": 14579,
+      "decode_kv": 14590,
+      "prefill_nixl": 5600,
+      "decode_nixl": 5601
+    },
+    "logs": {
+      "prefill": "/tmp/prefill.log",
+      "decode": "/tmp/decode.log",
+      "proxy": "/tmp/proxy.log",
+      "standalone": "/tmp/standalone.log"
+    },
+    "env": {
+      "NODE_IP": "127.0.0.1",
+      "NCCL_IB_DISABLE": "1",
+      "NCCL_DEBUG": "INFO",
+      "VLLM_LOGGING_LEVEL": "INFO",
+      "FLOWPREFILL_POLICY": "conservative"
+    }
+  },
+
+  "aggressive": {
+    "model": {
+      "name": "meta-llama/Llama-3.1-8B-Instruct",
+      "max_model_len": 8500,
+      "max_num_batched_tokens": 9000,
+      "enable_chunked_prefill": false,
+      "async_scheduling": false,
+      "enable_prefix_caching": false
+    },
+    "topology": {
+      "prefill_tp": 1,
+      "decode_tp": 1,
+      "prefill_gpus": "0",
+      "decode_gpus": "1",
+      "standalone_gpus": "0",
+      "prefill_gpu_mem_util": 0.85,
+      "decode_gpu_mem_util": 0.85
+    },
+    "ports": {
+      "prefill": 8100,
+      "decode": 8200,
+      "standalone": 8300,
+      "proxy_http": 10001,
+      "proxy_zmq": 30001,
+      "prefill_kv": 14579,
+      "decode_kv": 14590,
+      "prefill_nixl": 5600,
+      "decode_nixl": 5601
+    },
+    "logs": {
+      "prefill": "/tmp/prefill.log",
+      "decode": "/tmp/decode.log",
+      "proxy": "/tmp/proxy.log",
+      "standalone": "/tmp/standalone.log"
+    },
+    "env": {
+      "NODE_IP": "127.0.0.1",
+      "NCCL_IB_DISABLE": "1",
+      "NCCL_DEBUG": "INFO",
+      "VLLM_LOGGING_LEVEL": "INFO",
+      "FLOWPREFILL_POLICY": "aggressive"
+    }
+  }
+}

@@ -153,6 +153,15 @@ def preempt_check_at_attention(layer_name: str) -> None:
     """
     global _invocation_count, _current_layer_idx
 
+    # Fast path for control mode (FlowPrefill disabled on this node): if no
+    # preempt target was registered by the SLO monitor, the vote is forever
+    # 0 — skip the all_reduce, the TP lookup, and the layer counter entirely.
+    # Zero overhead vs. vanilla vLLM, which is the property the control arm
+    # of the benchmark needs. Without this, every attention layer still runs
+    # a 1-element MAX all_reduce (~10-30μs × 80 layers ≈ 1-2ms per prefill).
+    if _preempt_target_step_id is None:
+        return
+
     # Skip during CUDA stream capture: vLLM captures CUDA graphs at warmup
     # time (for uniform decode batches). Inside the capture context, any
     # CPU-GPU sync (like `.item()`) raises `cudaErrorStreamCaptureUnsupported`.

@@ -255,7 +255,32 @@ def fit_predictor(buckets_summary: list[dict]) -> dict:
     }
 
 
+def _load_deploy_cfg() -> dict | None:
+    """Import deploy.config.load() to resolve --model + --tp defaults from
+    the same SoT the server uses. Returns None on import failure (allows
+    --model + --tp to fall back to required CLI args)."""
+    import sys as _sys
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    if str(repo_root) not in _sys.path:
+        _sys.path.insert(0, str(repo_root))
+    try:
+        from deploy.config import load as _load
+        return _load()
+    except Exception:
+        return None
+
+
 def main() -> int:
+    _cfg = _load_deploy_cfg()
+    if _cfg is not None:
+        _default_model = _cfg["model"]["name"]
+        _default_tp = _cfg["topology"]["prefill_tp"]
+        _default_endpoint = f"http://localhost:{_cfg['ports']['proxy_http']}"
+    else:
+        _default_model = ""
+        _default_tp = None
+        _default_endpoint = "http://localhost:10001"
+
     parser = argparse.ArgumentParser(
         description=(
             "FlowPrefill TTFT profiler — measures per-bucket prefill TTFT and "
@@ -264,13 +289,13 @@ def main() -> int:
     )
     parser.add_argument(
         "--endpoint",
-        default="http://localhost:10001",
+        default=_default_endpoint,
         help="Proxy URL (default: %(default)s)",
     )
     parser.add_argument(
         "--model",
-        required=True,
-        help="Model name string passed in the request payload",
+        default=_default_model,
+        help="Defaults to $MODEL from deploy/config.sh.",
     )
     parser.add_argument(
         "--buckets",
@@ -297,8 +322,8 @@ def main() -> int:
     parser.add_argument(
         "--tp",
         type=int,
-        default=None,
-        help="Tensor parallel size — for metadata only",
+        default=_default_tp,
+        help="Tensor parallel size (defaults to $PREFILL_TP) — metadata only",
     )
     parser.add_argument(
         "--seed",
@@ -307,6 +332,11 @@ def main() -> int:
         help="Random seed for prompt generation (default: %(default)d)",
     )
     args = parser.parse_args()
+
+    if not args.model:
+        print("ERROR: --model not supplied and $MODEL not in env. "
+              "Did config.sh source correctly?", file=sys.stderr)
+        return 1
 
     random.seed(args.seed)
     buckets = [int(b.strip()) for b in args.buckets.split(",")]

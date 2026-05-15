@@ -1099,12 +1099,30 @@ class EngineCoreProc(EngineCore):
             )
 
             if is_prefill_node and scheduling_assumptions_hold:
-                from vllm.v1.core.sched.slo_monitor import SLOMonitor
+                from vllm.v1.core.sched.slo_monitor import (
+                    AggressivePolicy,
+                    ConservativePolicy,
+                    SLOMonitor,
+                )
+
+                policy_name = os.environ.get(
+                    "FLOWPREFILL_POLICY", "conservative"
+                ).lower()
+                if policy_name == "conservative":
+                    policy = ConservativePolicy()
+                elif policy_name == "aggressive":
+                    policy = AggressivePolicy()
+                else:
+                    raise ValueError(
+                        f"Unknown FLOWPREFILL_POLICY={policy_name!r}. "
+                        "Valid: conservative | aggressive."
+                    )
 
                 self.slo_monitor = SLOMonitor(
                     self.scheduler,
                     self.preempt_target_step_id,
                     pending_scheduler_preempts=self._pending_scheduler_preempts,
+                    policy=policy,
                 )
                 self.slo_monitor.start()
             else:

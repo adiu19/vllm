@@ -42,9 +42,9 @@ RUN pip3 install \
     py-spy \
     "nixl[cu13]>=0.7.1,<=0.10.1"
 
-# Clone the fork. The repo URL is baked in; the BRANCH is set at runtime by
-# init.sh (`git checkout $MODE`). Default branch from clone is just a starting
-# point — first init.sh run switches to whatever $MODE is.
+# Clone the fork. init.sh pulls the FlowPrefill working branch on every
+# container start (single-branch model — policy is a runtime knob in
+# deploy/config.json, not a branch).
 RUN git clone https://github.com/adiu19/vllm /opt/vllm-fork && \
     sed -i 's/^license = "Apache-2.0"/license = {text = "Apache-2.0"}/' /opt/vllm-fork/pyproject.toml && \
     sed -i '/^license-files/d' /opt/vllm-fork/pyproject.toml
@@ -68,9 +68,10 @@ WORKDIR /opt/vllm-fork
 # Required pod-level env vars (NOT baked into image; set via RunPod dashboard
 # or `docker run -e`):
 #   HF_TOKEN  → HuggingFace token; required for gated models (Llama, Mistral)
-#   MODE      → control | treatment ; selects branch and flag set
 #
 # Optional:
+#   MODE      → control | conservative | aggressive ; selects policy bucket
+#               from deploy/config.json. Defaults to "conservative" if unset.
 #   SKIP_INIT → set to "1" to bypass init.sh on startup (useful when iterating
 #               on init.sh itself or debugging a stuck pod)
 

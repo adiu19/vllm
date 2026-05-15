@@ -1,11 +1,10 @@
 #!/bin/bash
-# Idempotent model download into $HF_HOME/hub. Reads $MODEL from config.sh.
+# Idempotent model download into $HF_HOME/hub. Reads $MODEL from config.py.
 # Skips xet + .pth duplicates; tuned for slow/unreliable network FS.
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=/dev/null
-source "$SCRIPT_DIR/config.sh"
+eval "$(python3 "$SCRIPT_DIR/config.py")" || { echo "config.py failed" >&2; exit 1; }
 
 : "${HF_TOKEN:?HF_TOKEN must be set}"
 : "${MODEL:?MODEL must be set}"
