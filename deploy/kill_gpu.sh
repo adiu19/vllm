@@ -1,31 +1,96 @@
 #!/bin/bash
-# Kill all vllm and proxy processes and wait for GPU memory to free
+# Kill all vLLM-related processes and wait for GPU memory to free.
+#
+# Catches three classes of process:
+#   1. NVML-registered compute processes (visible in `nvidia-smi`).
+#   2. Pattern-matched processes by name (api_server, WorkerProc, etc.).
+#   3. Zombie processes holding /dev/nvidia* device handles that died mid-init
+#      and never registered with NVML — only visible via `fuser` / `lsof`.
+#      This is the case that bit us with the EngineCore that crashed during
+#      model load: held all GPU device file descriptors but invisible to
+#      `nvidia-smi --query-compute-apps`.
 
+set -u
+
+# ─────────────────────────────────────────────────────────────────────────
+# 1. Pattern-based kills covering all FlowPrefill-related processes
+# ─────────────────────────────────────────────────────────────────────────
 pkill -9 -f vllm
-pkill -9 -f "disagg_proxy"
-pkill -9 -f "start_prefill"
-pkill -9 -f "start_decode"
+pkill -9 -f api_server
+pkill -9 -f WorkerProc
+pkill -9 -f multiproc_executor
+pkill -9 -f "start_prefill_nixl"
+pkill -9 -f "start_decode_nixl"
+pkill -9 -f "start_proxy_nixl"
 pkill -9 -f "start_standalone"
-pkill -9 -f "proxy.py"
-pkill -9 -f "toy_proxy_server"
+pkill -9 -f "benchmarks/flowprefill/proxy.py"
+pkill -9 -f "benchmarks/flowprefill/profile_ttft"
+pkill -9 -f "benchmarks/flowprefill/loadgen"
 
-# Kill any remaining processes holding GPU memory
-nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | xargs -r kill -9
+# ─────────────────────────────────────────────────────────────────────────
+# 2. NVML-registered compute processes (visible to nvidia-smi)
+# ─────────────────────────────────────────────────────────────────────────
+nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null \
+    | xargs -r kill -9
 
-# Release KV transfer ports (may survive if process died before GPU alloc)
+# ─────────────────────────────────────────────────────────────────────────
+# 3. Zombie cleanup: anything still holding /dev/nvidia* handles.
+#
+# fuser shows ALL processes with the device open, including those that
+# never finished CUDA init (and thus don't show up in nvidia-smi).
+# This catches partially-started worker procs after a model-load failure.
+# ─────────────────────────────────────────────────────────────────────────
+echo "Checking for processes holding /dev/nvidia* device handles..."
+NVIDIA_PIDS=$(
+    fuser /dev/nvidia* 2>/dev/null \
+        | tr -s ' \t' '\n' \
+        | grep -oE '^[0-9]+' \
+        | sort -u
+)
+if [ -n "${NVIDIA_PIDS:-}" ]; then
+    echo "  Zombie PIDs found: $(echo "$NVIDIA_PIDS" | tr '\n' ' ')"
+    for pid in $NVIDIA_PIDS; do
+        # Skip PID 1 (init) defensively. Skip self.
+        if [ "$pid" = "1" ] || [ "$pid" = "$$" ]; then
+            continue
+        fi
+        # Skip kernel threads (no /proc/$pid/exe). Check via /proc/$pid/comm
+        # so we can log what we're killing.
+        if [ -r "/proc/$pid/comm" ]; then
+            cmd=$(cat "/proc/$pid/comm" 2>/dev/null || echo '?')
+            echo "  Killing PID $pid ($cmd)"
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+    done
+else
+    echo "  None."
+fi
+
+# ─────────────────────────────────────────────────────────────────────────
+# 4. Release ports (KV-transfer, HTTP, NIXL side-channels, etc.)
+# ─────────────────────────────────────────────────────────────────────────
 for port in 14579 14580 14581 14590 14591 8100 8200 8300 10001 30001 5600 5601; do
     fuser -k ${port}/tcp 2>/dev/null && echo "Freed port ${port}"
 done
 
-# Wait until GPU memory is actually freed
-echo "Waiting for GPU memory to free..."
+# ─────────────────────────────────────────────────────────────────────────
+# 5. Wait for GPU memory to free across ALL visible GPUs (not just GPU 0)
+# ─────────────────────────────────────────────────────────────────────────
+echo "Waiting for GPU memory to free across all visible GPUs..."
 for i in $(seq 1 20); do
     sleep 2
-    mem=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)
-    echo "  GPU 0 memory used: ${mem} MiB"
-    if [ "$mem" -lt 500 ]; then
-        echo "GPU clear."
+    MAX_MEM=$(
+        nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits \
+            | sort -n \
+            | tail -1
+    )
+    if [ "${MAX_MEM:-99999}" -lt 500 ]; then
+        echo "All GPUs clear."
         break
     fi
+    echo "  Iteration $i/20: max GPU memory still used = ${MAX_MEM} MiB"
 done
-nvidia-smi
+
+# Final state for the user to inspect.
+echo
+nvidia-smi --query-gpu=index,name,memory.used --format=csv
