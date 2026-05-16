@@ -46,16 +46,42 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
 
+# tee everything to a sweep log under RUN_DIR so it's reviewable after
+# the SSH session ends or the script finishes.
+SWEEP_LOG="$RUN_DIR/sweep.log"
+exec > >(tee -a "$SWEEP_LOG") 2>&1
+
+# Total cell count + progress tracker. Counter file lets us resume-aware
+# this later (skip cells whose output CSV already exists) — for now,
+# just used for the progress display.
+TOTAL_CELLS=$(( ${#RATES[@]} * ${#POLICIES[@]} * ${#TRIALS[@]} ))
+CELLS_DONE=0
+SWEEP_START_S=$(date +%s)
+
+# Timestamped log helper. Use `log "..."` instead of bare echo for
+# anything we want to time-stamp in the sweep log.
+log() {
+    printf "[%s] %s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
+}
+
+human_dur() {
+    # $1 = seconds → "1h23m45s"
+    local s=$1
+    printf "%dh%02dm%02ds" $((s/3600)) $(((s%3600)/60)) $((s%60))
+}
+
 # Banner so the run dir is unambiguous in logs.
-echo "════════════════════════════════════════════════════════════════════"
-echo "FlowPrefill sweep:  $RUN_NAME"
-echo "  rates    : ${RATES[*]}"
-echo "  policies : ${POLICIES[*]}"
-echo "  trials   : ${TRIALS[*]}"
-echo "  warmup   : ${WARMUP_S}s   measure: ${MEASURE_S}s"
-echo "  seed     : $MASTER_SEED   tier_split: $TIER_SPLIT"
-echo "  output   : $RUN_DIR"
-echo "════════════════════════════════════════════════════════════════════"
+log "════════════════════════════════════════════════════════════════════"
+log "FlowPrefill sweep:  $RUN_NAME"
+log "  rates    : ${RATES[*]}"
+log "  policies : ${POLICIES[*]}"
+log "  trials   : ${TRIALS[*]}"
+log "  warmup   : ${WARMUP_S}s   measure: ${MEASURE_S}s"
+log "  seed     : $MASTER_SEED   tier_split: $TIER_SPLIT"
+log "  output   : $RUN_DIR"
+log "  sweep log: $SWEEP_LOG"
+log "  cells    : $TOTAL_CELLS total"
+log "════════════════════════════════════════════════════════════════════"
 
 wait_for_uvicorn() {
     # $1 = log path, $2 = port. Polls log until uvicorn's ready message
@@ -145,19 +171,69 @@ archive_logs_for_policy() {
 # Pull MODEL once for the smoke completion in bring_up_stack.
 eval "$(python3 deploy/config.py 2>/dev/null)"
 
+cell_csv_path() {
+    # Where this cell's CSV would land. Same naming loadgen uses.
+    echo "$1/trial_${2}_policy_${3}.csv"
+}
+
+policy_has_pending_trials() {
+    # Returns 0 (true) if at least one trial in this (rate, policy)
+    # still needs running — meaning we need to bring the stack up.
+    local rate_dir=$1
+    local policy=$2
+    for t in "${TRIALS[@]}"; do
+        if [ ! -f "$(cell_csv_path "$rate_dir" "$t" "$policy")" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 for rate in "${RATES[@]}"; do
     rate_dir="$RUN_DIR/rate_${rate}"
     mkdir -p "$rate_dir"
-    echo
-    echo "──── rate = $rate req/s ─────────────────────────────────────────"
+    log ""
+    log "──── rate = $rate req/s ─────────────────────────────────────────"
 
     for policy in "${POLICIES[@]}"; do
-        echo
-        echo "  policy = $policy"
+        log ""
+        log "  policy = $policy"
+        policy_start_s=$(date +%s)
+
+        # Resume: skip bringing the stack up if every trial in this
+        # (rate, policy) cell already has its CSV on disk. Saves the
+        # ~60s bring-up cost on a re-run that's only filling gaps.
+        if ! policy_has_pending_trials "$rate_dir" "$policy"; then
+            log "  [skip] all ${#TRIALS[@]} trials already complete for ($rate, $policy)"
+            CELLS_DONE=$((CELLS_DONE + ${#TRIALS[@]}))
+            continue
+        fi
+
         bring_up_stack "$policy"
+        log "  [stack] bring-up took $(human_dur $(($(date +%s) - policy_start_s)))"
 
         for trial in "${TRIALS[@]}"; do
-            echo "    trial $trial ..."
+            CELLS_DONE=$((CELLS_DONE + 1))
+            csv_path=$(cell_csv_path "$rate_dir" "$trial" "$policy")
+
+            # Resume: per-trial skip when CSV already exists.
+            if [ -f "$csv_path" ]; then
+                log "    trial $trial  (cell $CELLS_DONE/$TOTAL_CELLS) — skipped (CSV exists)"
+                continue
+            fi
+
+            cell_start_s=$(date +%s)
+            elapsed_s=$((cell_start_s - SWEEP_START_S))
+            # ETA = elapsed * (remaining / done). Crude but useful after
+            # the first ~5 cells warm up the estimate.
+            if [ $CELLS_DONE -gt 1 ]; then
+                eta_s=$(( elapsed_s * (TOTAL_CELLS - CELLS_DONE + 1) / (CELLS_DONE - 1) ))
+                eta_str=$(human_dur $eta_s)
+            else
+                eta_str="—"
+            fi
+            log "    trial $trial  (cell $CELLS_DONE/$TOTAL_CELLS  elapsed=$(human_dur $elapsed_s)  ETA=$eta_str)"
+
             MODE=$policy python3 benchmarks/flowprefill/loadgen.py \
                 --rate "$rate" \
                 --warmup-s "$WARMUP_S" \
@@ -167,11 +243,17 @@ for rate in "${RATES[@]}"; do
                 --trial-id "$trial" \
                 --max-tokens "$MAX_TOKENS" \
                 --output-dir "$rate_dir"
+
+            log "    trial $trial done in $(human_dur $(($(date +%s) - cell_start_s)))"
         done
 
         archive_logs_for_policy "$rate" "$policy"
+        log "  policy=$policy total $(human_dur $(($(date +%s) - policy_start_s)))"
     done
 done
+
+log ""
+log "Sweep finished in $(human_dur $(($(date +%s) - SWEEP_START_S)))"
 
 echo
 echo "════════════════════════════════════════════════════════════════════"
