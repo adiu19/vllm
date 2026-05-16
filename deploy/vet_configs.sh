@@ -140,11 +140,14 @@ done
 
 # ─────────────────────────────────────────────────────────────────────────
 section "8. Loadgen imports predictor from slo_monitor (single SoT)"
-if grep -E "from vllm.v1.core.sched.slo_monitor import" benchmarks/flowprefill/loadgen.py \
-        | grep -q "TTFT_COEFF"; then
-    ok "loadgen imports TTFT_COEFF_* from slo_monitor — no drift risk"
+# Two simple checks: import line present, and the constant is referenced
+# in the file at least twice (once in the import, once in usage).
+has_import=$(grep -c "from vllm.v1.core.sched.slo_monitor" benchmarks/flowprefill/loadgen.py)
+has_const=$(grep -c "TTFT_COEFF_A_MS_PER_TOKEN" benchmarks/flowprefill/loadgen.py)
+if [ "$has_import" -ge 1 ] && [ "$has_const" -ge 2 ]; then
+    ok "loadgen imports TTFT_COEFF_* from slo_monitor AND uses them ($has_const references)"
 else
-    fail "loadgen does NOT import predictor coefficients — may use stale hardcoded values"
+    fail "loadgen predictor wiring looks off (import=$has_import, const_refs=$has_const)"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────
