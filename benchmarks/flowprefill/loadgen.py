@@ -68,8 +68,10 @@ from deploy.config import load as _load_deploy_config  # noqa: E402
 
 # Tier SLO bands as multipliers on the predicted baseline TTFT. From
 # Flow Prefill/Benchmark Design.md, Step 2. SLO drawn uniformly within
-# the band; one draw per request.
-TIER_BANDS = {
+# the band; one draw per request. CLI flags override these for the
+# urgent-band sweep experiment that characterizes FlowPrefill's regime
+# of effectiveness.
+DEFAULT_TIER_BANDS = {
     "urgent":   (1.0, 1.3),
     "generous": (3.0, 10.0),
 }
@@ -150,6 +152,7 @@ def build_request_schedule(
     tier_split: float,
     prompts_pool: list[str],
     tokenizer,
+    tier_bands: dict[str, tuple[float, float]],
     min_prompt_tokens: int = MIN_PROMPT_TOKENS,
     max_prompt_tokens: int = MAX_PROMPT_TOKENS,
 ) -> list[dict]:
@@ -210,7 +213,7 @@ def build_request_schedule(
 
         is_urgent = rng.random() < tier_split
         tier = "urgent" if is_urgent else "generous"
-        lo, hi = TIER_BANDS[tier]
+        lo, hi = tier_bands[tier]
         slo_ms = int(round(baseline_ms * rng.uniform(lo, hi)))
 
         schedule.append({
@@ -467,6 +470,8 @@ def write_outputs(
         "measure_s": args.measure_s,
         "tier_split": args.tier_split,
         "max_tokens": args.max_tokens,
+        "urgent_band":   [args.urgent_band_lo, args.urgent_band_hi],
+        "generous_band": [args.generous_band_lo, args.generous_band_hi],
         "n_requests_scheduled": len(schedule),
         "n_requests_recorded": len(rows),
         "n_errors": sum(1 for r in rows if r["error"]),
@@ -531,6 +536,18 @@ def main() -> int:
     ap.add_argument("--master-seed", type=int, default=42)
     ap.add_argument("--output-dir", required=True)
     ap.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
+    ap.add_argument("--urgent-band-lo", type=float,
+                    default=DEFAULT_TIER_BANDS["urgent"][0],
+                    help="Urgent SLO band lower multiplier on predicted TTFT.")
+    ap.add_argument("--urgent-band-hi", type=float,
+                    default=DEFAULT_TIER_BANDS["urgent"][1],
+                    help="Urgent SLO band upper multiplier on predicted TTFT.")
+    ap.add_argument("--generous-band-lo", type=float,
+                    default=DEFAULT_TIER_BANDS["generous"][0],
+                    help="Generous SLO band lower multiplier.")
+    ap.add_argument("--generous-band-hi", type=float,
+                    default=DEFAULT_TIER_BANDS["generous"][1],
+                    help="Generous SLO band upper multiplier.")
     ap.add_argument("--min-prompt-tokens", type=int, default=MIN_PROMPT_TOKENS,
                     help="Lower bound on prompt length (tokens). Bump up to "
                          "force prefill contention on fast models — pairs of "
@@ -578,6 +595,13 @@ def main() -> int:
     tokenizer = get_tokenizer(args.model)
 
     # 2. Build schedule (SLO sized via predictor, not via baseline lookup).
+    tier_bands = {
+        "urgent":   (args.urgent_band_lo, args.urgent_band_hi),
+        "generous": (args.generous_band_lo, args.generous_band_hi),
+    }
+    print(f"[loadgen] tier bands: urgent=[{args.urgent_band_lo}, "
+          f"{args.urgent_band_hi}]  generous=[{args.generous_band_lo}, "
+          f"{args.generous_band_hi}]")
     schedule = build_request_schedule(
         master_seed=args.master_seed,
         trial_id=args.trial_id,
@@ -587,6 +611,7 @@ def main() -> int:
         tier_split=args.tier_split,
         prompts_pool=prompts_pool,
         tokenizer=tokenizer,
+        tier_bands=tier_bands,
         min_prompt_tokens=args.min_prompt_tokens,
         max_prompt_tokens=args.max_prompt_tokens,
     )
