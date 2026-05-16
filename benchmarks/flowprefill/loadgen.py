@@ -450,12 +450,26 @@ def write_outputs(
 
 
 def main() -> int:
-    # Resolve deploy config first so we can default --model, --mode, and
-    # the endpoint from it. HF_TOKEN must already be in the pod env
-    # (RunPod template); config.py raises otherwise.
+    # MODE must be in env, same value used to start the prefill server.
+    # We deliberately do NOT default this — silent defaults caused trial_6
+    # to get labeled "conservative" while the server was running aggressive.
+    # Requiring it explicit means the operator (or the benchmark orchestrator)
+    # passes the same MODE that launched the server. Catches mismatch loud.
+    env_mode = os.environ.get("MODE")
+    if env_mode is None:
+        print(
+            "ERROR: MODE env var must be set, with the SAME value used when\n"
+            "starting the prefill node (start_prefill_nixl.sh). Example:\n"
+            "  MODE=conservative python3 benchmarks/flowprefill/loadgen.py ...\n"
+            "Valid: control | conservative | aggressive",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Resolve deploy config (uses MODE from env). Endpoint + model default
+    # from this.
     deploy_cfg = _load_deploy_config()
     default_model = deploy_cfg["model"]["name"]
-    default_mode = deploy_cfg["mode"]
     default_proxy_port = deploy_cfg["ports"]["proxy_http"]
     default_endpoint = f"http://localhost:{default_proxy_port}"
 
@@ -463,7 +477,7 @@ def main() -> int:
     ap.add_argument("--endpoint", default=default_endpoint,
                     help="Proxy endpoint (HTTP, no trailing slash).")
     ap.add_argument("--model", default=default_model,
-                    help="Defaults to $MODEL set by deploy/config.sh.")
+                    help="Defaults to $MODEL from deploy/config.py.")
     ap.add_argument("--dataset",
                     default="/workspace/datasets/sharegpt/ShareGPT_V3_unfiltered_cleaned_split.json")
     ap.add_argument("--rate", type=float, required=True,
@@ -472,9 +486,12 @@ def main() -> int:
     ap.add_argument("--measure-s", type=float, default=300.0)
     ap.add_argument("--tier-split", type=float, default=0.2,
                     help="Fraction urgent (the rest are generous).")
-    ap.add_argument("--mode", default=default_mode,
+    # --mode pulled from $MODE; no default to argparse. We validate the
+    # CLI value (if supplied) matches the env value below.
+    ap.add_argument("--mode", default=env_mode,
                     choices=["control", "conservative", "aggressive"],
-                    help="Defaults to $MODE set by deploy/config.sh.")
+                    help="Pinned to $MODE; pass explicitly only if you "
+                         "really want to override (will fail if mismatched).")
     ap.add_argument("--trial-id", type=int, required=True)
     ap.add_argument("--master-seed", type=int, default=42)
     ap.add_argument("--output-dir", required=True)
@@ -488,9 +505,22 @@ def main() -> int:
                     help="Upper bound on prompt length (tokens).")
     args = ap.parse_args()
 
+    # Reject CLI/env mismatch loudly — exactly the failure mode of trial_6
+    # (server aggressive, loadgen conservative). Forces operator to think
+    # twice before overriding.
+    if args.mode != env_mode:
+        print(
+            f"ERROR: --mode={args.mode!r} but $MODE={env_mode!r}. The CSV "
+            "label must match the server's actual policy. Restart the "
+            "prefill node with the intended MODE, or drop --mode and trust "
+            "the env.",
+            file=sys.stderr,
+        )
+        return 1
+
     if not args.model:
         print("ERROR: --model not supplied and $MODEL not in env. "
-              "Did config.sh source correctly?", file=sys.stderr)
+              "Did config.py resolve correctly?", file=sys.stderr)
         return 1
     if not args.mode:
         print("ERROR: --mode not supplied and $MODE not in env.",
