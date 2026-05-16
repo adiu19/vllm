@@ -28,9 +28,13 @@ set -e
 set -u
 
 # ─── Knobs ────────────────────────────────────────────────────────────────
-RATES=(${RATES:-"2 4 6 8 10"})         # req/s sweep points
-TRIALS=(${TRIALS:-"0 1 2 3 4"})        # paired-trial IDs (same seed family)
-POLICIES=(${POLICIES:-"control conservative aggressive"})
+# `read -ra` does the word splitting explicitly — the older
+# `POLICIES=(${POLICIES:-"a b c"})` pattern depends on bash word-splitting
+# inside array assignment and can collapse to a 1-element array if the
+# default-value quotes survive expansion. read -ra is unambiguous.
+read -ra RATES    <<< "${RATES:-2 4 6 8 10}"
+read -ra TRIALS   <<< "${TRIALS:-0 1 2 3 4}"
+read -ra POLICIES <<< "${POLICIES:-control conservative aggressive}"
 MASTER_SEED=${MASTER_SEED:-42}
 WARMUP_S=${WARMUP_S:-30}
 MEASURE_S=${MEASURE_S:-300}
