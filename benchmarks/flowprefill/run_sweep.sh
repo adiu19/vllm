@@ -201,17 +201,39 @@ cell_csv_path() {
     echo "$1/trial_${2}_policy_${3}.csv"
 }
 
+cell_meta_path() {
+    echo "$1/trial_${2}_policy_${3}.meta.json"
+}
+
+cell_is_complete() {
+    # A cell counts as complete only if BOTH its csv AND its meta.json
+    # exist on disk AND are non-empty. Catches the failure mode where
+    # an MFS hiccup wrote the CSV but left meta.json as 0 bytes — that
+    # cell needs to be re-run, not skipped.
+    local csv=$(cell_csv_path "$1" "$2" "$3")
+    local meta=$(cell_meta_path "$1" "$2" "$3")
+    [ -s "$csv" ] && [ -s "$meta" ]
+}
+
 policy_has_pending_trials() {
     # Returns 0 (true) if at least one trial in this (rate, policy)
     # still needs running — meaning we need to bring the stack up.
     local rate_dir=$1
     local policy=$2
     for t in "${TRIALS[@]}"; do
-        if [ ! -f "$(cell_csv_path "$rate_dir" "$t" "$policy")" ]; then
+        if ! cell_is_complete "$rate_dir" "$t" "$policy"; then
             return 0
         fi
     done
     return 1
+}
+
+clean_partial_cell() {
+    # Remove any half-written artifacts so loadgen starts from clean
+    # state on a re-run. Safe to call on a never-started cell too.
+    local csv=$(cell_csv_path "$1" "$2" "$3")
+    local meta=$(cell_meta_path "$1" "$2" "$3")
+    rm -f "$csv" "$meta"
 }
 
 for rate in "${RATES[@]}"; do
@@ -239,13 +261,15 @@ for rate in "${RATES[@]}"; do
 
         for trial in "${TRIALS[@]}"; do
             CELLS_DONE=$((CELLS_DONE + 1))
-            csv_path=$(cell_csv_path "$rate_dir" "$trial" "$policy")
 
-            # Resume: per-trial skip when CSV already exists.
-            if [ -f "$csv_path" ]; then
-                log "    trial $trial  (cell $CELLS_DONE/$TOTAL_CELLS) — skipped (CSV exists)"
+            # Resume: per-trial skip when the cell is fully complete
+            # (both csv AND meta.json present + non-empty). Partial
+            # writes get cleaned up so loadgen starts from scratch.
+            if cell_is_complete "$rate_dir" "$trial" "$policy"; then
+                log "    trial $trial  (cell $CELLS_DONE/$TOTAL_CELLS) — skipped (complete)"
                 continue
             fi
+            clean_partial_cell "$rate_dir" "$trial" "$policy"
 
             cell_start_s=$(date +%s)
             elapsed_s=$((cell_start_s - SWEEP_START_S))

@@ -407,6 +407,31 @@ def _resolved_env_snapshot(deploy_cfg: dict) -> dict[str, str]:
     return snapshot
 
 
+def _write_with_retry(path: Path, write_fn, *, label: str, attempts: int = 4) -> None:
+    """Write a file via `write_fn(file_handle)`, retrying on transient
+    OSErrors (typically MFS network-FS hiccups: Errno 5 I/O error, etc.).
+    Backoff is exponential starting at 2 seconds. Raises only if all
+    attempts fail — caller can let the script die loudly at that point.
+    """
+    last_exc = None
+    for i in range(attempts):
+        try:
+            with path.open("w", newline="") as f:
+                write_fn(f)
+            return
+        except OSError as e:
+            last_exc = e
+            backoff = 2 ** i
+            print(f"[loadgen] write to {label}={path} failed (attempt "
+                  f"{i+1}/{attempts}): {e}. Retrying in {backoff}s.",
+                  file=sys.stderr)
+            time.sleep(backoff)
+    raise RuntimeError(
+        f"All {attempts} write attempts to {label}={path} failed; last "
+        f"error: {last_exc}"
+    )
+
+
 def write_outputs(
     args, rows: list[dict], schedule: list[dict], deploy_cfg: dict
 ) -> None:
@@ -424,10 +449,12 @@ def write_outputs(
     ]
     # Sort by t_client_send_ms for readability — analyze.py doesn't depend on order.
     rows_sorted = sorted(rows, key=lambda r: r["t_client_send_ms"])
-    with csv_path.open("w", newline="") as f:
+
+    def write_csv(f):
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
         w.writerows(rows_sorted)
+    _write_with_retry(csv_path, write_csv, label="csv")
 
     meta = {
         "master_seed": args.master_seed,
@@ -448,8 +475,10 @@ def write_outputs(
         "ended_at_ms": max((r["t_decode_last_byte_ms"] for r in rows), default=0),
         "env_snapshot": _resolved_env_snapshot(deploy_cfg),
     }
-    with meta_path.open("w") as f:
+
+    def write_meta(f):
         json.dump(meta, f, indent=2)
+    _write_with_retry(meta_path, write_meta, label="meta")
 
     print(f"[loadgen] wrote {csv_path} ({len(rows_sorted)} rows)")
     print(f"[loadgen] wrote {meta_path}")
