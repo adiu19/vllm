@@ -36,6 +36,7 @@ WARMUP_S=${WARMUP_S:-30}
 MEASURE_S=${MEASURE_S:-300}
 TIER_SPLIT=${TIER_SPLIT:-0.2}
 MAX_TOKENS=${MAX_TOKENS:-4}
+BROKEN_GPUS="4"   # comma-separated indices to skip in kill_gpu wait loop
 # ──────────────────────────────────────────────────────────────────────────
 
 RUN_NAME="${1:-$(date -u +%Y%m%dT%H%M%SZ)}"
@@ -73,14 +74,23 @@ human_dur() {
 # Banner so the run dir is unambiguous in logs.
 log "════════════════════════════════════════════════════════════════════"
 log "FlowPrefill sweep:  $RUN_NAME"
-log "  rates    : ${RATES[*]}"
-log "  policies : ${POLICIES[*]}"
-log "  trials   : ${TRIALS[*]}"
-log "  warmup   : ${WARMUP_S}s   measure: ${MEASURE_S}s"
-log "  seed     : $MASTER_SEED   tier_split: $TIER_SPLIT"
-log "  output   : $RUN_DIR"
-log "  sweep log: $SWEEP_LOG"
-log "  cells    : $TOTAL_CELLS total"
+log "  rates       : ${RATES[*]}"
+log "  policies    : ${POLICIES[*]}"
+log "  trials      : ${TRIALS[*]}"
+log "  warmup      : ${WARMUP_S}s   measure: ${MEASURE_S}s"
+log "  seed        : $MASTER_SEED   tier_split: $TIER_SPLIT"
+log "  max_tokens  : $MAX_TOKENS"
+log "  broken_gpus : ${BROKEN_GPUS:-<none>}    # GPUs excluded from kill_gpu wait loop"
+log "  output      : $RUN_DIR"
+log "  sweep log   : $SWEEP_LOG"
+log "  cells       : $TOTAL_CELLS total"
+log "════════════════════════════════════════════════════════════════════"
+
+# Snapshot the GPU state at sweep start. Lets us cross-reference any
+# "broken_gpus" entries above with what the hardware actually shows.
+log "GPU state at sweep start:"
+nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader \
+    | while IFS= read -r line; do log "  $line"; done
 log "════════════════════════════════════════════════════════════════════"
 
 wait_for_uvicorn() {
@@ -117,7 +127,10 @@ bring_up_stack() {
     # disk cache).
     local mode=$1
     echo "  [stack] killing previous instances..."
-    bash deploy/kill_gpu.sh || true
+    # BROKEN_GPUS lets kill_gpu skip the wait-loop on GPUs whose memory
+    # we can't clear (e.g. host-side stuck allocation). Set via env so
+    # the same script works on healthy hosts too.
+    BROKEN_GPUS="${BROKEN_GPUS:-}" bash deploy/kill_gpu.sh || true
     sleep 3
 
     echo "  [stack] starting prefill + decode in parallel (MODE=$mode)..."
