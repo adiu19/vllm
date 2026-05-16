@@ -94,22 +94,23 @@ nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader \
 log "════════════════════════════════════════════════════════════════════"
 
 wait_for_uvicorn() {
-    # $1 = log path, $2 = port. Polls log until uvicorn's ready message
-    # appears, then a /v1/models check. Cap at 15 min per service —
-    # 70B weights + CUDA graph capture + NIXL handshake can run long
-    # on cold FUSE-mounted storage.
+    # $1 = log path, $2 = port. Two-stage check:
+    #   (a) log says "Application startup complete" (FastAPI ready)
+    #   (b) /v1/models responds 200 (HTTP layer actively serving)
+    # Both must pass — guards against curl racing the bind AND guards
+    # against false positives if stale log content lingers (we truncate
+    # logs at bring_up_stack entry to make (a) reliable).
+    # Cap at 15 min per service (70B + CUDA graph capture + NIXL).
     local log_path=$1
     local port=$2
     local svc=$3
     local deadline=$(( $(date +%s) + 900 ))
     echo "    waiting for $svc on :$port ..."
     while [ $(date +%s) -lt $deadline ]; do
-        if grep -q "Uvicorn running on http://0.0.0.0:$port" "$log_path" 2>/dev/null; then
-            sleep 1
-            if curl -sf "http://localhost:$port/v1/models" >/dev/null 2>&1; then
-                echo "    $svc ready."
-                return 0
-            fi
+        if grep -q "Application startup complete" "$log_path" 2>/dev/null \
+           && curl -sf "http://localhost:$port/v1/models" >/dev/null 2>&1; then
+            echo "    $svc ready."
+            return 0
         fi
         sleep 3
     done
@@ -132,6 +133,13 @@ bring_up_stack() {
     # the same script works on healthy hosts too.
     BROKEN_GPUS="${BROKEN_GPUS:-}" bash deploy/kill_gpu.sh || true
     sleep 3
+
+    # Truncate the per-service logs BEFORE launching, so wait_for_uvicorn's
+    # grep for "Application startup complete" can't match stale content
+    # from a previous policy's run or any manual debug append.
+    : > /tmp/prefill.log
+    : > /tmp/decode.log
+    : > /tmp/proxy.log
 
     echo "  [stack] starting prefill + decode in parallel (MODE=$mode)..."
     MODE=$mode bash deploy/start_prefill_nixl.sh
