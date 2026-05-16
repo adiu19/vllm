@@ -59,11 +59,13 @@ echo "════════════════════════�
 
 wait_for_uvicorn() {
     # $1 = log path, $2 = port. Polls log until uvicorn's ready message
-    # appears, then a /v1/models check. Cap at 8 min per service.
+    # appears, then a /v1/models check. Cap at 15 min per service —
+    # 70B weights + CUDA graph capture + NIXL handshake can run long
+    # on cold FUSE-mounted storage.
     local log_path=$1
     local port=$2
     local svc=$3
-    local deadline=$(( $(date +%s) + 480 ))
+    local deadline=$(( $(date +%s) + 900 ))
     echo "    waiting for $svc on :$port ..."
     while [ $(date +%s) -lt $deadline ]; do
         if grep -q "Uvicorn running on http://0.0.0.0:$port" "$log_path" 2>/dev/null; then
@@ -75,34 +77,54 @@ wait_for_uvicorn() {
         fi
         sleep 3
     done
-    echo "ERROR: $svc did not come up in 8 min. See $log_path"
+    echo "ERROR: $svc did not come up in 15 min. See $log_path"
     return 1
 }
 
 bring_up_stack() {
-    # $1 = MODE for this run
+    # $1 = MODE for this run.
+    #
+    # Prefill and decode launch in parallel — both are reading the same
+    # already-downloaded weights from disk, no I/O competition between
+    # them since each loads its own TP-sharded slices into separate
+    # GPUs. Halves restart time per policy switch (~60s → ~30s on warm
+    # disk cache).
     local mode=$1
     echo "  [stack] killing previous instances..."
     bash deploy/kill_gpu.sh || true
     sleep 3
 
-    echo "  [stack] starting prefill (MODE=$mode)..."
+    echo "  [stack] starting prefill + decode in parallel (MODE=$mode)..."
     MODE=$mode bash deploy/start_prefill_nixl.sh
-    wait_for_uvicorn /tmp/prefill.log 8100 prefill
-
-    echo "  [stack] starting decode (MODE=$mode)..."
     MODE=$mode bash deploy/start_decode_nixl.sh
-    wait_for_uvicorn /tmp/decode.log 8200 decode
+
+    # Both vllm processes are loading concurrently in the background
+    # now. Wait for each to expose its API in parallel.
+    wait_for_uvicorn /tmp/prefill.log 8100 prefill &
+    local pwait=$!
+    wait_for_uvicorn /tmp/decode.log  8200 decode  &
+    local dwait=$!
+    wait $pwait || { echo "ERROR: prefill failed to come up"; return 1; }
+    wait $dwait || { echo "ERROR: decode failed to come up";  return 1; }
 
     echo "  [stack] starting proxy..."
     bash deploy/start_proxy_nixl.sh
-    sleep 2
-    # Proxy doesn't expose /v1/models — single completion smoke check.
-    if ! curl -sf -o /dev/null -X POST "http://localhost:10001/v1/completions" \
-         -H "Content-Type: application/json" \
-         -H "X-FlowPrefill-SLO-MS: 10000" \
-         -d '{"model":"'"$MODEL"'","prompt":"ok","max_tokens":1,"stream":false}'; then
-        echo "ERROR: proxy didn't respond to a smoke completion."
+    # Proxy health: retry up to 30s. Even after uvicorn binds, the
+    # first end-to-end completion through P → NIXL → D needs a moment.
+    local proxy_ok=0
+    for i in $(seq 1 15); do
+        if curl -sf -o /dev/null -X POST "http://localhost:10001/v1/completions" \
+             -H "Content-Type: application/json" \
+             -H "X-FlowPrefill-SLO-MS: 10000" \
+             -d '{"model":"'"$MODEL"'","prompt":"ok","max_tokens":1,"stream":false}' \
+             2>/dev/null; then
+            proxy_ok=1
+            break
+        fi
+        sleep 2
+    done
+    if [ $proxy_ok -eq 0 ]; then
+        echo "ERROR: proxy didn't pass a smoke completion within 30s."
         return 1
     fi
     echo "  [stack] up."
