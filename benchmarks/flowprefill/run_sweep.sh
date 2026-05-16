@@ -283,7 +283,10 @@ log "Sweep finished in $(human_dur $(($(date +%s) - SWEEP_START_S)))"
 echo
 echo "════════════════════════════════════════════════════════════════════"
 echo "Sweep complete: $RUN_DIR"
-echo "Next: python3 benchmarks/flowprefill/analyze.py $RUN_DIR/rate_${RATES[2]}"
+# Pick the middle rate of whatever was actually swept as the
+# "suggested first analyze target" — works for 1-rate sanity runs too.
+mid_idx=$(( ${#RATES[@]} / 2 ))
+echo "Next: python3 benchmarks/flowprefill/analyze.py $RUN_DIR/rate_${RATES[$mid_idx]}"
 echo "  (use the contention-band rate's directory; analyze each rate dir"
 echo "   separately, or sweep-aggregate manually)"
 echo "════════════════════════════════════════════════════════════════════"
