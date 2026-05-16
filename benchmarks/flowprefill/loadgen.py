@@ -75,9 +75,12 @@ TIER_BANDS = {
 }
 
 # Completion-side defaults. max_tokens is intentionally small — TTFT is the
-# headline metric, not decode throughput, and keeping decodes short bounds
-# total run length.
-DEFAULT_MAX_TOKENS = 32
+# headline metric, not decode throughput. On 6-GPU setups (TP=4 prefill +
+# TP=2 decode) the decode KV pool is small (~4.6 concurrent requests at
+# 8k context); short decodes keep us well under that ceiling. 2 tokens is
+# enough to guarantee decode emits a visible response chunk; 1 is risky
+# because vLLM's disagg accounting may not yield a visible decode token.
+DEFAULT_MAX_TOKENS = 2
 
 # Prompt-length window we draw from. 256 is the smallest bucket the
 # profiler measured — using the predictor below this is extrapolation,
