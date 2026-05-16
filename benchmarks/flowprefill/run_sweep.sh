@@ -35,7 +35,7 @@ MASTER_SEED=${MASTER_SEED:-42}
 WARMUP_S=${WARMUP_S:-30}
 MEASURE_S=${MEASURE_S:-300}
 TIER_SPLIT=${TIER_SPLIT:-0.2}
-MAX_TOKENS=${MAX_TOKENS:-32}
+MAX_TOKENS=${MAX_TOKENS:-4}
 # ──────────────────────────────────────────────────────────────────────────
 
 RUN_NAME="${1:-$(date -u +%Y%m%dT%H%M%SZ)}"
