@@ -106,21 +106,33 @@ for port in 14579 14580 14581 14590 14591 8100 8200 8300 10001 30001 5600 5601; 
 done
 
 # ─────────────────────────────────────────────────────────────────────────
-# 5. Wait for GPU memory to free across ALL visible GPUs (not just GPU 0)
+# 5. Wait for GPU memory to free across the GPUs we actually use.
+#
+# Defaults to "all visible GPUs". Set BROKEN_GPUS="4,7" (etc.) in env to
+# skip GPUs with stuck allocations the script can't clear (e.g. a
+# host-side driver issue on one card — we route around it via
+# CUDA_VISIBLE_DEVICES in start scripts, but the wait loop here would
+# otherwise hang on the orphan memory).
 # ─────────────────────────────────────────────────────────────────────────
-echo "Waiting for GPU memory to free across all visible GPUs..."
+echo "Waiting for GPU memory to free across allocated GPUs..."
+BROKEN_GPUS="${BROKEN_GPUS:-}"
+broken_set=" $(echo "$BROKEN_GPUS" | tr ',' ' ') "
 for i in $(seq 1 20); do
     sleep 2
     MAX_MEM=$(
-        nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits \
+        nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits \
+            | while IFS=', ' read -r idx mem; do
+                if echo "$broken_set" | grep -q " $idx "; then continue; fi
+                echo "$mem"
+              done \
             | sort -n \
             | tail -1
     )
-    if [ "${MAX_MEM:-99999}" -lt 500 ]; then
-        echo "All GPUs clear."
+    if [ -z "$MAX_MEM" ] || [ "$MAX_MEM" -lt 500 ]; then
+        echo "All non-broken GPUs clear."
         break
     fi
-    echo "  Iteration $i/20: max GPU memory still used = ${MAX_MEM} MiB"
+    echo "  Iteration $i/20: max GPU memory still used (excluding broken=[${BROKEN_GPUS}]) = ${MAX_MEM} MiB"
 done
 
 # Final state for the user to inspect.
