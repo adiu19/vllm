@@ -29,11 +29,14 @@ echo "════════════════════════�
 
 echo
 echo "[1/4] Cleanup..."
-pkill -9 -f vllm 2>/dev/null || true
-pkill -9 -f api_server 2>/dev/null || true
-pkill -9 -f WorkerProc 2>/dev/null || true
-pkill -9 -f huggingface-cli 2>/dev/null || true
-pkill -9 -f "hf download" 2>/dev/null || true
+# Be SPECIFIC with patterns. A bare `pkill -f vllm` matches this script's
+# own command line (since we run from /opt/vllm-fork/), causing it to
+# kill itself. Match on the actual python invocations instead.
+pkill -9 -f "python.*vllm\.entrypoints" 2>/dev/null || true
+pkill -9 -f "python.*WorkerProc"        2>/dev/null || true
+pkill -9 -f "python.*api_server"        2>/dev/null || true
+pkill -9 -f "huggingface-cli"           2>/dev/null || true
+pkill -9 -f "hf download"               2>/dev/null || true
 sleep 2
 
 incomplete_count=$(find "$MODEL_CACHE_PATH" -name "*.incomplete" 2>/dev/null | wc -l || echo 0)
