@@ -32,8 +32,11 @@ GENEROUS_BAND_LO=3.0
 GENEROUS_BAND_HI=10.0
 
 RATE=${RATE:-6}                      # contention-band operating point
-TRIALS=(${TRIALS:-"0 1 2"})          # 3 trials per cell for exploratory CIs
-POLICIES=(${POLICIES:-"control conservative aggressive"})
+# `read -ra` does the word-split explicitly — the `VAR=(${VAR:-"a b c"})`
+# pattern collapses to a 1-element array in some bash versions (the same
+# bug we hit in run_sweep.sh).
+read -ra TRIALS   <<< "${TRIALS:-0 1 2}"
+read -ra POLICIES <<< "${POLICIES:-control conservative aggressive}"
 MASTER_SEED=${MASTER_SEED:-42}
 WARMUP_S=${WARMUP_S:-30}
 MEASURE_S=${MEASURE_S:-300}
