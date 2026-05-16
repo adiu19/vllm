@@ -338,6 +338,14 @@ class SLOMonitor:
         self._heartbeat_interval_s = heartbeat_interval_s
         self._preempt_margin = preempt_margin
         self._last_heartbeat_monotonic = 0.0
+        # Dedup state for PREEMPT INTENT logging. Monitor polls every 5ms
+        # but step_id only changes once per schedule() (~hundreds of ms
+        # under realistic prefill latencies), so without dedup every
+        # in-batch preempt produces dozens of identical log lines. Track
+        # the (step_id, target_request_id) we last fired against and skip
+        # the log + the .value reassignment when both still match.
+        self._last_logged_step_id: int = -1
+        self._last_logged_target_request_id: str = ""
         self._stop_event = threading.Event()
 
         # Tell the scheduler to start producing snapshots at the end of
@@ -440,6 +448,17 @@ class SLOMonitor:
         # monitor's next tick will re-fire and re-set it.
         self._scheduler._preempt_hint_request_id = top_waiting.request_id
 
+        # Dedup: if we already fired against this (step_id, target) pair on
+        # a recent tick, skip both the side effect and the log. Without
+        # this, every monitor poll (5ms) while step_id is stable produces
+        # an identical PREEMPT INTENT line — dozens per actual preempt.
+        already_fired = (
+            self._last_logged_step_id == snap.step_id
+            and self._last_logged_target_request_id == target.request_id
+        )
+        if already_fired:
+            return
+
         if target_in_batch:
             # In-batch preempt: target is being processed RIGHT NOW.
             # Trigger forward-pass abort via the existing mp.Value path.
@@ -457,6 +476,9 @@ class SLOMonitor:
                 log_route = "scheduler-level"
             else:
                 log_route = "noop (queue unavailable)"
+
+        self._last_logged_step_id = snap.step_id
+        self._last_logged_target_request_id = target.request_id
 
         logger.info(
             "PREEMPT INTENT (route=%s, step_id=%d): waiting %s "

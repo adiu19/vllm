@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 
 # ─── Knobs you can flip without re-reading the rest of this file ──────────
-SMOKE = False
+SMOKE = False  # flip to True for smoke testing (8B / TP=1+1 / 2 GPUs)
 DEFAULT_MODE = "conservative"
 # ──────────────────────────────────────────────────────────────────────────
 

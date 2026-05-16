@@ -266,7 +266,10 @@ async def fire_request(
             f"{endpoint}/v1/completions",
             json=payload,
             headers=headers,
-            timeout=httpx.Timeout(60.0, connect=10.0),
+            # 70B prefill on long prompts can take 1-2s by itself; under
+            # contention with deep queues a request can wait several
+            # seconds before its prefill even starts. 5min total guard.
+            timeout=httpx.Timeout(300.0, connect=10.0),
         ) as resp:
             # Proxy emits these headers as soon as the prefill is done.
             sa = resp.headers.get("X-Server-Arrival-Time-Ms")
